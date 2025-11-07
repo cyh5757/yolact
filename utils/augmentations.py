@@ -127,11 +127,11 @@ class Pad(object):
         return expand_image, masks, boxes, labels
 
 class Resize(object):
-    """ If preserve_aspect_ratio is true, this resizes to an approximate area of max_size * max_size """
+    """If preserve_aspect_ratio is true, this resizes to an approximate area of max_size * max_size"""
 
     @staticmethod
     def calc_size_preserve_ar(img_w, img_h, max_size):
-        """ I mathed this one out on the piece of paper. Resulting width*height = approx max_size^2 """
+        """Resulting width*height ≈ max_size^2 while maintaining AR."""
         ratio = sqrt(img_w / img_h)
         w = max_size * ratio
         h = max_size / ratio
@@ -150,33 +150,62 @@ class Resize(object):
         else:
             width, height = self.max_size, self.max_size
 
+        # 이미지 리사이즈 (보간은 기본/선형)
         image = cv2.resize(image, (width, height))
 
         if self.resize_gt:
-            # Act like each object is a color channel
-            masks = masks.transpose((1, 2, 0))
-            masks = cv2.resize(masks, (width, height))
-            
-            # OpenCV resizes a (w,h,1) array to (s,s), so fix that
-            if len(masks.shape) == 2:
-                masks = np.expand_dims(masks, 0)
-            else:
-                masks = masks.transpose((2, 0, 1))
+            # ----- 마스크 리사이즈 -----
+            # (N, H, W) -> (H, W, N)로 바꿔서 OpenCV에 넣기
+            masks = masks.transpose((1, 2, 0))  # (H, W, N_objs)
 
-            # Scale bounding boxes (which are currently absolute coordinates)
+            cv_limit = 512
+            if masks.shape[2] <= cv_limit:
+                resized = cv2.resize(
+                    np.ascontiguousarray(masks),
+                    (width, height),
+                    interpolation=cv2.INTER_NEAREST
+                )
+                if resized.ndim == 2:  # 단일 채널이면 (H,W)로 나옴
+                    resized = resized[:, :, None]
+                masks = resized
+            else:
+                chunks = []
+                for i in range(0, masks.shape[2], cv_limit):
+                    chunk = np.ascontiguousarray(masks[:, :, i:i + cv_limit])
+                    res = cv2.resize(
+                        chunk,
+                        (width, height),
+                        interpolation=cv2.INTER_NEAREST
+                    )
+                    if res.ndim == 2:
+                        res = res[:, :, None]
+                    chunks.append(res)
+                masks = np.concatenate(chunks, axis=2)
+
+            # (H, W, N) -> (N, H, W)
+            masks = masks.transpose((2, 0, 1))
+
+            # ----- 박스 스케일 조정 (절대좌표인 상태) -----
             boxes[:, [0, 2]] *= (width  / img_w)
             boxes[:, [1, 3]] *= (height / img_h)
 
-        # Discard boxes that are smaller than we'd like
+        # ----- 너무 작은 박스 제거 -----
         w = boxes[:, 2] - boxes[:, 0]
         h = boxes[:, 3] - boxes[:, 1]
-
-        keep = (w > cfg.discard_box_width) * (h > cfg.discard_box_height)
+        scale = cfg.max_size / 1024.0  # 원래 1024 기준이었다면
+        min_w = cfg.discard_box_width  * scale
+        min_h = cfg.discard_box_height * scale
+        keep = (w > min_w) & (h > min_h)
+        # print(f"[Resize] before={len(w)} kept={int(keep.sum())} "
+        #     f"thr=({cfg.discard_box_width},{cfg.discard_box_height}) "
+        #     f"minwh=({w.min() if len(w)>0 else -1:.3f},{h.min() if len(h)>0 else -1:.3f})")
         masks = masks[keep]
         boxes = boxes[keep]
-        labels['labels'] = labels['labels'][keep]
-        labels['num_crowds'] = (labels['labels'] < 0).sum()
 
+        if isinstance(labels, dict) and 'labels' in labels:
+            labels['labels'] = labels['labels'][keep]
+            labels['num_crowds'] = int((labels['labels'] < 0).sum())
+        # print(f"[DEBUG] Resize -> img_hw={img_h}x{img_w}, new size: {width}x{height}, preserve_ar={cfg.preserve_aspect_ratio}, max_size={cfg.max_size}")
         return image, masks, boxes, labels
 
 
@@ -306,7 +335,8 @@ class RandomSampleCrop(object):
         height, width, _ = image.shape
         while True:
             # randomly choose a mode
-            mode = random.choice(self.sample_options)
+            idx = np.random.randint(0, len(self.sample_options))
+            mode = self.sample_options[idx]
             if mode is None:
                 return image, masks, boxes, labels
 
@@ -604,7 +634,11 @@ class BaseTransform(object):
     def __init__(self, mean=MEANS, std=STD):
         self.augment = Compose([
             ConvertFromInts(),
-            Resize(resize_gt=False),
+            ToAbsoluteCoords(),
+            Resize(resize_gt=True),
+            # Resize(),
+            ToPercentCoords(),
+            PrepareMasks(cfg.mask_size, cfg.use_gt_bboxes),
             BackboneTransform(cfg.backbone.transform, mean, std, 'BGR')
         ])
 
@@ -671,14 +705,14 @@ class SSDAugmentation(object):
         self.augment = Compose([
             ConvertFromInts(),
             ToAbsoluteCoords(),
-            enable_if(cfg.augment_photometric_distort, PhotometricDistort()),
-            enable_if(cfg.augment_expand, Expand(mean)),
-            enable_if(cfg.augment_random_sample_crop, RandomSampleCrop()),
-            enable_if(cfg.augment_random_mirror, RandomMirror()),
-            enable_if(cfg.augment_random_flip, RandomFlip()),
-            enable_if(cfg.augment_random_flip, RandomRot90()),
+            #enable_if(cfg.augment_photometric_distort, PhotometricDistort()),
+            #enable_if(cfg.augment_expand, Expand(mean)),
+            #enable_if(cfg.augment_random_sample_crop, RandomSampleCrop()),
+            #enable_if(cfg.augment_random_mirror, RandomMirror()),
+            # enable_if(cfg.augment_random_flip, RandomFlip()),
+            #enable_if(cfg.augment_random_flip, RandomRot90()),
             Resize(),
-            enable_if(not cfg.preserve_aspect_ratio, Pad(cfg.max_size, cfg.max_size, mean)),
+            #enable_if(not cfg.preserve_aspect_ratio, Pad(cfg.max_size, cfg.max_size, mean)),
             ToPercentCoords(),
             PrepareMasks(cfg.mask_size, cfg.use_gt_bboxes),
             BackboneTransform(cfg.backbone.transform, mean, std, 'BGR')

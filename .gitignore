@@ -153,8 +153,19 @@ scripts/aws3/
 data/config_dev.py
 data/coco/
 data/sbd/
-
+*.pth
+*.pt
+weights/
+experiments/
+data_analyze_shell/
+__pycache__/
+.ipynb_checkpoints/
+*.pyc
+*.log
 vid/
 vidres/
 
+*.png
+*.jpg
+wandb/
 _.py

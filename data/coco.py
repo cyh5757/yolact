@@ -103,48 +103,35 @@ class COCODetection(data.Dataset):
             index (int): Index
         Returns:
             tuple: Tuple (image, target, masks, height, width, crowd).
-                   target is the object returned by ``coco.loadAnns``.
-            Note that if no crowd annotations exist, crowd will be None
         """
         img_id = self.ids[index]
 
         if self.has_gt:
             ann_ids = self.coco.getAnnIds(imgIds=img_id)
-
-            # Target has {'segmentation', 'area', iscrowd', 'image_id', 'bbox', 'category_id'}
             target = [x for x in self.coco.loadAnns(ann_ids) if x['image_id'] == img_id]
         else:
             target = []
 
-        # Separate out crowd annotations. These are annotations that signify a large crowd of
-        # objects of said class, where there is no annotation for each individual object. Both
-        # during testing and training, consider these crowds as neutral.
-        crowd  = [x for x in target if     ('iscrowd' in x and x['iscrowd'])]
+        crowd  = [x for x in target if ('iscrowd' in x and x['iscrowd'])]
         target = [x for x in target if not ('iscrowd' in x and x['iscrowd'])]
         num_crowds = len(crowd)
 
         for x in crowd:
             x['category_id'] = -1
-
-        # This is so we ensure that all crowd annotations are at the end of the array
         target += crowd
-        
-        # The split here is to have compatibility with both COCO2014 and 2017 annotations.
-        # In 2014, images have the pattern COCO_{train/val}2014_%012d.jpg, while in 2017 it's %012d.jpg.
-        # Our script downloads the images as %012d.jpg so convert accordingly.
+
         file_name = self.coco.loadImgs(img_id)[0]['file_name']
-        
         if file_name.startswith('COCO'):
             file_name = file_name.split('_')[-1]
 
         path = osp.join(self.root, file_name)
-        assert osp.exists(path), 'Image path does not exist: {}'.format(path)
+        assert osp.exists(path), f'Image path does not exist: {path}'
         
         img = cv2.imread(path)
         height, width, _ = img.shape
-        
+
+        masks = None
         if len(target) > 0:
-            # Pool all the masks for this image into one [num_objects,height,width] matrix
             masks = [self.coco.annToMask(obj).reshape(-1) for obj in target]
             masks = np.vstack(masks)
             masks = masks.reshape(-1, height, width)
@@ -152,24 +139,40 @@ class COCODetection(data.Dataset):
         if self.target_transform is not None and len(target) > 0:
             target = self.target_transform(target, width, height)
 
+        n_before = len(target) if target is not None else 0
+
         if self.transform is not None:
-            if len(target) > 0:
+            if n_before > 0:
                 target = np.array(target)
-                img, masks, boxes, labels = self.transform(img, masks, target[:, :4],
-                    {'num_crowds': num_crowds, 'labels': target[:, 4]})
-            
-                # I stored num_crowds in labels so I didn't have to modify the entirety of augmentations
+                img, masks, boxes, labels = self.transform(
+                    img, masks, target[:, :4],
+                    {'num_crowds': num_crowds, 'labels': target[:, 4]}
+                )
                 num_crowds = labels['num_crowds']
                 labels     = labels['labels']
-                
-                target = np.hstack((boxes, np.expand_dims(labels, axis=1)))
+                target     = np.hstack((boxes, np.expand_dims(labels, axis=1)))
             else:
-                img, _, _, _ = self.transform(img, np.zeros((1, height, width), dtype=np.float), np.array([[0, 0, 1, 1]]),
-                    {'num_crowds': 0, 'labels': np.array([0])})
+                # dummy transform
+                img, _, _, _ = self.transform(
+                    img,
+                    np.zeros((1, height, width), dtype=np.float),
+                    np.array([[0, 0, 1, 1]]),
+                    {'num_crowds': 0, 'labels': np.array([0])}
+                )
                 masks = None
                 target = None
 
-        if target.shape[0] == 0:
+        n_after = target.shape[0] if (target is not None and isinstance(target, np.ndarray)) else 0
+
+        # === 디버그: 증강으로 인해 GT가 모두 사라진 경우 ===
+        if n_before > 0 and n_after == 0:
+            # print(f"[AUG-DROP] img_id={img_id} file={file_name} "
+            #       f"before={n_before} after={n_after}")
+            # 여기서 원본/증강 이미지를 /tmp 에 저장해 원인 확인 가능
+            dbg_dir = "/tmp/yolact_aug_debug"
+            os.makedirs(dbg_dir, exist_ok=True)
+            cv2.imwrite(osp.join(dbg_dir, f"{img_id:012d}_orig.jpg"), img)
+
             print('Warning: Augmentation output an example with no ground truth. Resampling...')
             return self.pull_item(random.randint(0, len(self.ids)-1))
 

@@ -180,49 +180,73 @@ class Detect(object):
         return boxes, masks, classes, scores
 
     def traditional_nms(self, boxes, masks, scores, iou_threshold=0.5, conf_thresh=0.05):
-        import pyximport
-        pyximport.install(setup_args={"include_dirs":np.get_include()}, reload_support=True)
+        import numpy as np
 
-        from utils.cython_nms import nms as cnms
+        # --- (A) cnms 가져오기 시도 + 폴백 준비
+        cnms = None
+        try:
+            import pyximport
+            import numpy as _np
+            pyximport.install(setup_args={"include_dirs": _np.get_include()}, reload_support=True)
+            from utils.cython_nms import nms as _cnms
+            cnms = _cnms
+        except Exception:
+            cnms = None
 
         num_classes = scores.size(0)
 
-        idx_lst = []
-        cls_lst = []
-        scr_lst = []
+        idx_lst, cls_lst, scr_lst = [], [], []
 
-        # Multiplying by max_size is necessary because of how cnms computes its area and intersections
-        boxes = boxes * cfg.max_size
+        # cnms는 너비/높이 계산 방식 때문에 스케일을 크게 쓰는 구현이라 기존대로 유지
+        boxes = boxes * cfg.max_size  # (N, 4) on device
 
         for _cls in range(num_classes):
-            cls_scores = scores[_cls, :]
-            conf_mask = cls_scores > conf_thresh
-            idx = torch.arange(cls_scores.size(0), device=boxes.device)
+            cls_scores = scores[_cls, :]                              # (N,)
+            conf_mask  = cls_scores > conf_thresh                     # (N,)
+            if not torch.any(conf_mask):
+                continue
 
-            cls_scores = cls_scores[conf_mask]
+            # 선택된 인덱스 (디바이스 일관성 유지)
+            idx = torch.arange(cls_scores.size(0), device=boxes.device)
             idx = idx[conf_mask]
 
-            if cls_scores.size(0) == 0:
+            cls_scores_sel = cls_scores[conf_mask]                    # (M,)
+            boxes_sel      = boxes[conf_mask]                         # (M,4)
+
+            # --- (B) NMS 실행: cnms 우선, 실패 시 torchvision.ops.nms
+            if cnms is not None:
+                preds = torch.cat([boxes_sel, cls_scores_sel[:, None]], dim=1)  # (M,5)
+                # cnms는 numpy float32 요구
+                preds_np = preds.detach().cpu().numpy().astype(np.float32, copy=False)
+                keep_np  = cnms(preds_np, np.float32(iou_threshold))             # numpy int indices
+                keep     = torch.as_tensor(keep_np, dtype=torch.long, device=boxes.device)
+            else:
+                from torchvision.ops import nms
+                keep = nms(boxes_sel, cls_scores_sel, iou_threshold=iou_threshold).to(boxes.device).long()
+
+            if keep.numel() == 0:
                 continue
-            
-            preds = torch.cat([boxes[conf_mask], cls_scores[:, None]], dim=1).cpu().numpy()
-            keep = cnms(preds, iou_threshold)
-            keep = torch.Tensor(keep, device=boxes.device).long()
 
-            idx_lst.append(idx[keep])
-            cls_lst.append(keep * 0 + _cls)
-            scr_lst.append(cls_scores[keep])
-        
-        idx     = torch.cat(idx_lst, dim=0)
-        classes = torch.cat(cls_lst, dim=0)
-        scores  = torch.cat(scr_lst, dim=0)
+            # --- (C) 결과 누적: 길이/디바이스/dtype 일치 보장
+            idx_lst.append(idx[keep])                                           # (K,)
+            cls_lst.append(torch.full((keep.numel(),), _cls, dtype=torch.long, device=boxes.device))
+            scr_lst.append(cls_scores_sel[keep])                                # (K,)
 
-        scores, idx2 = scores.sort(0, descending=True)
-        idx2 = idx2[:cfg.max_num_detections]
+        # --- (D) 어떤 클래스도 통과 못 했으면 None 반환
+        if len(idx_lst) == 0:
+            return None
+
+        idx     = torch.cat(idx_lst, dim=0)      # (T,)
+        classes = torch.cat(cls_lst, dim=0)      # (T,)
+        scores  = torch.cat(scr_lst, dim=0)      # (T,)
+
+        # 상위 max_num_detections만 유지
+        scores, order = scores.sort(0, descending=True)
+        order  = order[:cfg.max_num_detections]
         scores = scores[:cfg.max_num_detections]
 
-        idx = idx[idx2]
-        classes = classes[idx2]
+        idx     = idx[order]
+        classes = classes[order]
 
-        # Undo the multiplication above
+        # 스케일 되돌리기, 동일 인덱스로 마스크도 선택
         return boxes[idx] / cfg.max_size, masks[idx], classes, scores

@@ -218,6 +218,7 @@ class PredictionModule(nn.Module):
 
         with timer.env('makepriors'):
             if self.last_img_size != (cfg._tmp_img_w, cfg._tmp_img_h):
+                # print(f"[DEBUG] YOLACT sees input size: {cfg._tmp_img_h}x{cfg._tmp_img_w}")
                 prior_data = []
 
                 # Iteration order is important (it has to sync up with the convout)
@@ -245,7 +246,7 @@ class PredictionModule(nn.Module):
 
                                 prior_data += [x, y, w, h]
 
-                self.priors = torch.Tensor(prior_data, device=device).view(-1, 4).detach()
+                self.priors = torch.tensor(prior_data, dtype=torch.float32, device=device).view(-1, 4)
                 self.priors.requires_grad = False
                 self.last_img_size = (cfg._tmp_img_w, cfg._tmp_img_h)
                 self.last_conv_size = (conv_w, conv_h)
@@ -487,7 +488,7 @@ class Yolact(nn.Module):
             if key.startswith('fpn.downsample_layers.'):
                 if cfg.fpn is not None and int(key.split('.')[2]) >= cfg.fpn.num_downsample:
                     del state_dict[key]
-        self.load_state_dict(state_dict)
+        self.load_state_dict(state_dict, strict=False)
 
     def init_weights(self, backbone_path):
         """ Initialize weights for training. """

@@ -28,31 +28,9 @@ COLORS = ((244,  67,  54),
 MEANS = (103.94, 116.78, 123.68)
 STD   = (57.38, 57.12, 58.40)
 
-COCO_CLASSES = ('person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus',
-                'train', 'truck', 'boat', 'traffic light', 'fire hydrant',
-                'stop sign', 'parking meter', 'bench', 'bird', 'cat', 'dog',
-                'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe',
-                'backpack', 'umbrella', 'handbag', 'tie', 'suitcase', 'frisbee',
-                'skis', 'snowboard', 'sports ball', 'kite', 'baseball bat',
-                'baseball glove', 'skateboard', 'surfboard', 'tennis racket',
-                'bottle', 'wine glass', 'cup', 'fork', 'knife', 'spoon', 'bowl',
-                'banana', 'apple', 'sandwich', 'orange', 'broccoli', 'carrot',
-                'hot dog', 'pizza', 'donut', 'cake', 'chair', 'couch',
-                'potted plant', 'bed', 'dining table', 'toilet', 'tv', 'laptop',
-                'mouse', 'remote', 'keyboard', 'cell phone', 'microwave', 'oven',
-                'toaster', 'sink', 'refrigerator', 'book', 'clock', 'vase',
-                'scissors', 'teddy bear', 'hair drier', 'toothbrush')
+COCO_CLASSES = ('cell',)
 
-COCO_LABEL_MAP = { 1:  1,  2:  2,  3:  3,  4:  4,  5:  5,  6:  6,  7:  7,  8:  8,
-                   9:  9, 10: 10, 11: 11, 13: 12, 14: 13, 15: 14, 16: 15, 17: 16,
-                  18: 17, 19: 18, 20: 19, 21: 20, 22: 21, 23: 22, 24: 23, 25: 24,
-                  27: 25, 28: 26, 31: 27, 32: 28, 33: 29, 34: 30, 35: 31, 36: 32,
-                  37: 33, 38: 34, 39: 35, 40: 36, 41: 37, 42: 38, 43: 39, 44: 40,
-                  46: 41, 47: 42, 48: 43, 49: 44, 50: 45, 51: 46, 52: 47, 53: 48,
-                  54: 49, 55: 50, 56: 51, 57: 52, 58: 53, 59: 54, 60: 55, 61: 56,
-                  62: 57, 63: 58, 64: 59, 65: 60, 67: 61, 70: 62, 72: 63, 73: 64,
-                  74: 65, 75: 66, 76: 67, 77: 68, 78: 69, 79: 70, 80: 71, 81: 72,
-                  82: 73, 84: 74, 85: 75, 86: 76, 87: 77, 88: 78, 89: 79, 90: 80}
+COCO_LABEL_MAP = { 1:  1}
 
 
 
@@ -109,24 +87,18 @@ dataset_base = Config({
     'name': 'Base Dataset',
 
     # Training images and annotations
-    'train_images': './data/coco/images/',
-    'train_info':   'path_to_annotation_file',
+    'train_images': '/home/mbd1234/data/yolo_set_3/images/train',
+    'train_info':   '/home/mbd1234/data/yolo_set_3/annotations/instances_train.json',
 
     # Validation images and annotations.
-    'valid_images': './data/coco/images/',
-    'valid_info':   'path_to_annotation_file',
+    'valid_images': '/home/mbd1234/data/yolo_set_3/images/val',
+    'valid_info':   '/home/mbd1234/data/yolo_set_3/annotations/instances_val.json',
 
-    # Whether or not to load GT. If this is False, eval.py quantitative evaluation won't work.
     'has_gt': True,
-
-    # A list of names for each of you classes.
     'class_names': COCO_CLASSES,
-
-    # COCO class ids aren't sequential, so this is a bandage fix. If your ids aren't sequential,
-    # provide a map from category_id -> index in class_names + 1 (the +1 is there because it's 1-indexed).
-    # If not specified, this just assumes category ids start at 1 and increase sequentially.
-    'label_map': None
+    'label_map': COCO_LABEL_MAP
 })
+
 
 coco2014_dataset = dataset_base.copy({
     'name': 'COCO 2014',
@@ -208,8 +180,8 @@ darknet_transform = Config({
 # ----------------------- BACKBONES ----------------------- #
 
 backbone_base = Config({
-    'name': 'Base Backbone',
-    'path': 'path/to/pretrained/weights',
+    'name': 'ResNet101',
+    'path': '/home/mbd1234/yolact/weights/resnet101_reducedfc.pth',
     'type': object,
     'args': tuple(),
     'transform': resnet_transform,
@@ -302,6 +274,7 @@ vgg16_backbone = backbone_base.copy({
 
 
 
+
 # ----------------------- MASK BRANCH TYPES ----------------------- #
 
 mask_type = Config({
@@ -375,6 +348,8 @@ activation_func = Config({
     'sigmoid': torch.sigmoid,
     'softmax': lambda x: torch.nn.functional.softmax(x, dim=-1),
     'relu':    lambda x: torch.nn.functional.relu(x, inplace=True),
+    'gelu':    torch.nn.functional.gelu,
+    'leaky_relu': lambda x: torch.nn.functional.leaky_relu(x, negative_slope=0.01, inplace=True),
     'none':    lambda x: x,
 })
 
@@ -416,12 +391,12 @@ fpn_base = Config({
 
 coco_base_config = Config({
     'dataset': coco2014_dataset,
-    'num_classes': 81, # This should include the background class
+    'num_classes': 2, # This should include the background class
 
     'max_iter': 400000,
 
     # The maximum number of detections for evaluation
-    'max_num_detections': 100,
+    'max_num_detections': 2000,
 
     # dw' = momentum * dw - lr * (grad + decay * w)
     'lr': 1e-3,
@@ -447,7 +422,7 @@ coco_base_config = Config({
     'eval_mask_branch': True,
 
     # Top_k examples to consider for NMS
-    'nms_top_k': 200,
+    'nms_top_k': 600,
     # Examples with confidence less than this are not considered by NMS
     'nms_conf_thresh': 0.05,
     # Boxes with IoU overlap greater than this threshold will be culled during NMS
@@ -486,25 +461,26 @@ coco_base_config = Config({
 
     # SSD data augmentation parameters
     # Randomize hue, vibrance, etc.
-    'augment_photometric_distort': True,
+    'augment_photometric_distort': False,
     # Have a chance to scale down the image and pad (to emulate smaller detections)
-    'augment_expand': True,
+    'augment_expand': False,
     # Potentialy sample a random crop from the image and put it in a random place
-    'augment_random_sample_crop': True,
+    'augment_random_sample_crop': False,
     # Mirror the image with a probability of 1/2
-    'augment_random_mirror': True,
+    'augment_random_mirror': False,
     # Flip the image vertically with a probability of 1/2
     'augment_random_flip': False,
     # With uniform probability, rotate the image [0,90,180,270] degrees
     'augment_random_rot90': False,
 
     # Discard detections with width and height smaller than this (in absolute width and height)
-    'discard_box_width': 4 / 550,
-    'discard_box_height': 4 / 550,
+    # /pytorch/aten/src/ATen/native/cuda/Loss.cu:90: operator(): block: [190,0,0], thread: [64,0,0] Assertion `input_val >= zero && input_val <= one` failed. 이 부분 에러 고치기 위해서 4/550 -> 30/550으로 변경 -> 고쳐진게 아닌듯하다다
+    'discard_box_width': 10 / 550,
+    'discard_box_height': 10 / 550,
 
     # If using batchnorm anywhere in the backbone, freeze the batchnorm layer during training.
     # Note: any additional batch norm layers after the backbone will not be frozen.
-    'freeze_bn': False,
+    'freeze_bn': True,
 
     # Set this to a config object if you want an FPN (inherit from fpn_base). See fpn_base for details.
     'fpn': None,
@@ -661,7 +637,7 @@ yolact_base_config = coco_base_config.copy({
     'num_classes': len(coco2017_dataset.class_names) + 1,
 
     # Image Size
-    'max_size': 550,
+    'max_size': 1024,
     
     # Training params
     'lr_steps': (280000, 600000, 700000, 750000),
@@ -716,11 +692,77 @@ yolact_im700_config = yolact_base_config.copy({
     'name': 'yolact_im700',
 
     'masks_to_train': 300,
-    'max_size': 700,
+    'max_size': 1024,
     'backbone': yolact_base_config.backbone.copy({
-        'pred_scales': [[int(x[0] / yolact_base_config.max_size * 700)] for x in yolact_base_config.backbone.pred_scales],
+        'pred_scales': [[int(x[0] / yolact_base_config.max_size * 1024)] for x in yolact_base_config.backbone.pred_scales],
     }),
 })
+
+cell_yolact_im700_config = yolact_im700_config.copy({
+    'name': 'cell_yolact_im700',
+    'dataset': dataset_base,
+    'num_classes': len(dataset_base.class_names) + 1,  # = 2 (배경+cell)
+
+    # --------- 핵심: 소물체/밀집 리콜을 위한 후처리 튜닝 ---------
+    # YOLACT postprocess가 쓰는 값들 (원본 키 사용)
+    'nms_top_k':        2000,     # 후보 넉넉히
+    'nms_conf_thresh':  0.01,    # 낮은 스코어도 일단 살려서 리콜↑
+    'nms_thresh':       0.30,    # NMS IoU
+    'max_num_detections': 2000,   # 이미지당 최종 허용 수(세포 밀집 고려)
+    'use_fast_nms' : True,
+
+    # --------- 마스크/프로토 관련 ---------
+    'mask_type': mask_type.lincomb,             # 세포 도메인 권장
+    'mask_size': 28,                            # 16 → 28 경계 손실 완화
+    'mask_proto_src': 0,
+    'mask_proto_net': [(256, 3, {'padding': 1})] * 3 + [(None, -2, {}), (256, 3, {'padding': 1})] + [(32, 1, {})],
+    'mask_proto_normalize_emulate_roi_pooling': True,
+    'mask_proto_crop': True,
+    'mask_proto_crop_with_pred_box': False,
+
+    # --------- MaskIoU로 점수 재보정 ---------
+    'use_maskiou': False,
+    'maskiou_net': [(8, 3, {'stride': 2}), (16, 3, {'stride': 2}), (32, 3, {'stride': 2}),
+                    (64, 3, {'stride': 2}), (128, 3, {'stride': 2})],
+    'maskiou_alpha': 25,
+    'rescore_mask': True,
+    'rescore_bbox': False,
+
+    # --------- 앵커(작게 더 촘촘히) ---------
+    'backbone': resnet101_backbone.copy({
+        'selected_layers': list(range(1, 4)),
+        'use_pixel_scales': True,
+        'preapply_sqrt': False,
+        'use_square_anchors': True,
+        'pred_aspect_ratios': [ [[1, 1/2, 2]] ] * 5,
+        # 1024 해상도 기준 소물체 대응용으로 16 추가
+        'pred_scales': [[8], [24], [48], [96], [384]],  # 필요 시 [384] 복원 가능
+    }),
+
+    # --------- 학습 길이/디버그 ---------
+    'max_iter': 3000,
+    'mask_proto_debug': False,
+
+    # --------- 너무 작은 GT/Pred 필터 완화 ---------
+    # 1024 기준 가로/세로 최소 2픽셀 정도까지 허용
+    'discard_box_width':  2 / 1024,
+    'discard_box_height': 2 / 1024,
+
+    # --------- Optim/Scheduler (AdamW 기본값) ---------
+    'optim': 'adamw',                  # 'sgd' 또는 'adamw'
+    'scheduler': 'cosine',             # 'step' / 'cosine' / 'none'
+    'lr': 2e-4,                        # AdamW는 SGD보다 낮게 시작 추천
+    'adamw_weight_decay': 0.01,        # AdamW 전용 WD
+    'adamw_betas': (0.9, 0.999),
+    'adamw_eps': 1e-8,
+    'lr_warmup_until': 1000,           # 워밍업 살짝 늘림
+
+    # 이미 max_size=1024 (yolact_im700_config 상속)
+})
+
+
+
+
 
 yolact_darknet53_config = yolact_base_config.copy({
     'name': 'yolact_darknet53',
