@@ -624,21 +624,11 @@ def evaluate(net: Yolact, dataset, train_mode=False):
     """
     # 0) 방어: COCO 카테고리 매핑 준비
     try:
-        for i in range(num_frames):
-            timer.reset()
-            with timer.env('Video'):
-                frame = torch.Tensor(vid.read()[1]).float()
-                batch = transform(frame.unsqueeze(0))
-                preds = net(batch)
-                processed = prep_display(preds, frame, None, None, undo_transform=False, class_color=True)
-
-                out.write(processed)
-            
-            if i > 1:
-                frame_times.add(timer.total_time())
-                fps = 1 / frame_times.get_avg()
-                progress = (i+1) / num_frames * 100
-                progress_bar.set_val(i+1)
+        if not coco_cats:   # 전역 dict 비어있으면
+            prep_coco_cats()
+    except NameError:
+        # 일부 분기에서 전역 미정의인 경우 대비
+        prep_coco_cats()
 
     maps = {}  # ← None 금지. 최소한 빈 dict 반환.
 
