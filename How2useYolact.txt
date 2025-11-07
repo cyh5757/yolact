@@ -1,0 +1,184 @@
+
+# momentum 변경경
+  python train.py --config=cell_yolact_im700_config --batch_size=4 \
+  --optim=adamw --scheduler=cosine --lr=2e-4 --decay=0.01 --num_workers=2
+# SGD 
+python train.py --config=cell_yolact_im700_config --batch_size=8 \
+  --optim=sgd --scheduler=step --lr=1e-3 --momentum=0.9 --decay=5e-4
+
+
+
+python train.py \
+  --config=cell_yolact_im700_config \
+  --cfg_name=cell_yolact_expA_lack_removal \
+  --cfg_max_iter=400 \
+  --batch_size=4 \
+  --lr=2e-4 \
+  --cuda=True \
+  --num_workers=2 \
+  --validation_epoch=1 \
+  --validation_size=10 \
+  --optim=adamw \
+  --scheduler=cosine \
+  --decay=0.01
+
+
+# wandb_debugging 강화
+python train.py \
+  --config=cell_yolact_im700_config \
+  --batch_size=4 \
+  --lr=1e-3 \
+  --cuda=True \
+  --num_workers=2 \
+  --validation_epoch=1 \
+  --validation_size=2000 \
+  --wandb_debug \
+  --vis_interval=100 \
+  --val_score_thr=0.05
+
+# 이미지별
+python eval.py \
+  --trained_model=weights/cell_yolact_im700_331_6626.pth \
+  --config=cell_yolact_im700_config \
+  --image=/home/mbd1234/data/raw/sample2.jpg \
+  --score_threshold=0.01 \
+  --top_k=300 \
+  --cuda=True
+
+# 폴더별
+python eval.py \
+  --trained_model=weights/latest.pth \
+  --config=cell_yolact_im700_config \
+  --images=/path/to/val_images:/tmp/yolact_vis \
+  --score_threshold=0.01 \
+  --top_k=300 \
+  --cuda=True
+
+
+
+python eval.py   --trained_model /home/mbd1234/yolact/weights/cell_yolact_im700_279_5600.pth   --config cell_yolact_im700_config   --images "/home/mbd1234/data/yolo_set_3/images/val:/home/mbd1234/yolact/output/vis_test_5600"   --score_threshold 0.1   --top_k 200   --display_bboxes False   --display_text False
+
+
+python /home/mbd1234/yolact/eval.py   --config=cell_yolact_im700_config   --trained_model=/home/mbd1234/yolact/weights/cell_yolact_im700_79_3200.pth   --images /home/mbd1234/data/yolo_set_3/images/test:/home/mbd1234/yolact/output   --score_threshold=0.1 --top_k=400 --display_bboxes=True --display_text=False   --timechecker=True  --no_crop
+
+
+python /home/mbd1234/yolact/eval.py \
+  --config cell_yolact_im700_config \
+  --trained_model /home/mbd1234/yolact/weights/cell_yolact_im700_79_3200.pth \
+  --cuda=True \
+  --score_threshold=0.30 \
+  --top_k=50 \
+  --coco_images_dir "/home/mbd1234/data/yolo_set_3/images/train" \
+  --coco_ann_file "/home/mbd1234/data/yolo_set_3/annotations/instances_train.json" \
+  --output_coco_json \
+  --export_coco_gt_like "results/train_predictions_like_gt.json" \
+  --save_vis_dir "results/train_eval_vis" \
+  --cuda False
+
+
+#cli로 name 등 여러 config 변경 가능능
+python train.py \
+  --config=cell_yolact_im700_config \
+  --cfg_name=cell_251023_0831 \
+  --cfg_max_iter=400 \
+  --batch_size=4 \
+  --lr=2e-4 \
+  --cuda=True \
+  --num_workers=2 \
+  --validation_epoch=1 \
+  --validation_size=10 \
+  --optim=adamw --scheduler=cosine --decay=0.01
+
+
+
+
+  # 각 모델 추론 방식
+# (export_coco를 주면 output_coco_json은 자동으로 True)
+
+  python eval.py \
+  --trained_model /home/mbd1234/yolact/weights/cell_yolact_lr2e4_augdump/best_iter001160_ep028_score27.9900_30.0500.pth \
+  --config cell_yolact_im700_config \
+  --cuda True \
+  --coco_images_dir /home/mbd1234/data/yolo_set_3/images/val \
+  --coco_ann_file  /home/mbd1234/data/yolo_set_3/annotations/instances_val.json \
+  --score_threshold 0.05 \
+  --export_coco /home/mbd1234/data/yolo_set_3/annotations/preds_instances_val.json
+
+python eval.py \
+  --trained_model /home/mbd1234/yolact/weights/triage_noamp_bs1_lr1e4/best_iter000960_ep023_score21.1200_30.1400.pth \
+  --config cell_yolact_im700_config \
+  --cuda True \
+  --images /home/mbd1234/data/yolo_set_3/images/val:/home/mbd1234/data/Data_Analyze/preview/eval_testing_11051712 \
+  --score_threshold 0.05 \
+  --top_k 300 \
+  --fast_nms True \
+  --cross_class_nms False \
+  --display_bboxes True \
+  --display_masks True \
+  --display_text False \
+  --display_scores False
+
+
+#최신
+python train.py   --config=cell_yolact_im700_config   --cfg_name=cell_yolact_lr2e4_topk10   --cfg_max_iter=3000   --batch_size=2   --num_workers=2   --cuda=True   --validation_epoch=1   --validation_size=10   --optim=adamw   --scheduler=cosine   --lr=2e-4   --decay=0.01   --save_folder=/home/mbd1234/yolact/weights   --log_folder=/home/mbd1234/yolact/logs   --save_last_interval=200   --save_interval=1000   --save_best=True   --prefer_metric=mask_first   --top_k_best=10
+
+
+#교체 최신
+python train.py \
+  --config=cell_yolact_im700_config \
+  --batch_size=2 \
+  --num_workers=2 \
+  --cuda=True \
+  --validation_epoch=1 \
+  --validation_size=10 \
+  --optim=adamw \
+  --scheduler=cosine \
+  --lr=2e-4 \
+  --decay=0.01 \
+  --use_wandb=True \
+  --wandb_project=YOLACT-Cell \
+  --wandb_name=cell_yolact_lr2e4_nms06-iter2000 \
+  --exp_dir=/home/mbd1234/yolact/experiments/cell_yolact_lr2e4_nms06_iter2000 \
+  --no_autoscale
+
+
+
+
+최신 명령어
+python eval.py \
+  --trained_model /home/mbd1234/yolact/experiments/2511061516_lr2e4_nms06_iter3000/weights/cell_yolact_im700_74_3000.pth \
+  --config cell_yolact_im700_config \
+  --cuda True \
+  --images /home/mbd1234/data/yolo_set_3/images/val:/home/mbd1234/data/Data_Analyze/preview/eval_testing_11061516/vis \
+  --score_threshold 0.05 \
+  --top_k 300 \
+  --fast_nms True \
+  --cross_class_nms False \
+  --display_bboxes True \
+  --display_masks True \
+  --display_text False \
+  --display_scores False
+
+
+
+python eval.py \
+  --trained_model /home/mbd1234/yolact/weights/triage_noamp_bs1_lr1e4/best_iter000960_ep023_score21.1200_30.1400.pth \
+  --config cell_yolact_im700_config \
+  --cuda True \
+  --score_threshold 0.05 \
+  --top_k 300 \
+  --fast_nms True \
+  --cross_class_nms False \
+  --display_bboxes True \
+  --display_masks True \
+  --display_text False \
+  --display_scores False \
+  --coco_images_dir /home/mbd1234/data/yolo_set_3/images/val \
+  --coco_ann_file   /home/mbd1234/data/yolo_set_3/annotations/instances_val.json \
+  --max_images  -1 \
+  --output_coco_json \
+  --export_coco /home/mbd1234/data/Data_Analyze/preview/eval_testing_11051712/preds_instances_val.json \
+  --metrics_csv /home/mbd1234/data/Data_Analyze/preview/eval_testing_11051712/metrics.csv \
+  --profile_infer True \
+  --profile_warmup 2 \
+  --profile_csv /home/mbd1234/data/Data_Analyze/preview/eval_testing_11051712/profile.csv

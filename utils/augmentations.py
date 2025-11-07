@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 import types
 from numpy import random
+from math import sqrt
 
 from data import cfg, MEANS, STD
 
@@ -126,31 +127,18 @@ class Pad(object):
         return expand_image, masks, boxes, labels
 
 class Resize(object):
-    """
-    The same resizing scheme as used in faster R-CNN
-    https://arxiv.org/pdf/1506.01497.pdf
-
-    We resize the image so that the shorter side is min_size.
-    If the longer side is then over max_size, we instead resize
-    the image so the long side is max_size.
-    """
+    """If preserve_aspect_ratio is true, this resizes to an approximate area of max_size * max_size"""
 
     @staticmethod
-    def faster_rcnn_scale(width, height, min_size, max_size):
-        min_scale = min_size / min(width, height)
-        width  *= min_scale
-        height *= min_scale
-
-        max_scale = max_size / max(width, height)
-        if max_scale < 1: # If a size is greater than max_size
-            width  *= max_scale
-            height *= max_scale
-        
-        return int(width), int(height)
+    def calc_size_preserve_ar(img_w, img_h, max_size):
+        """Resulting width*height ≈ max_size^2 while maintaining AR."""
+        ratio = sqrt(img_w / img_h)
+        w = max_size * ratio
+        h = max_size / ratio
+        return int(w), int(h)
 
     def __init__(self, resize_gt=True):
         self.resize_gt = resize_gt
-        self.min_size = cfg.min_size
         self.max_size = cfg.max_size
         self.preserve_aspect_ratio = cfg.preserve_aspect_ratio
 
@@ -158,27 +146,66 @@ class Resize(object):
         img_h, img_w, _ = image.shape
         
         if self.preserve_aspect_ratio:
-            width, height = Resize.faster_rcnn_scale(img_w, img_h, self.min_size, self.max_size)
+            width, height = Resize.calc_size_preserve_ar(img_w, img_h, self.max_size)
         else:
             width, height = self.max_size, self.max_size
 
+        # 이미지 리사이즈 (보간은 기본/선형)
         image = cv2.resize(image, (width, height))
-        
-        if self.resize_gt:
-            # Act like each object is a color channel
-            masks = masks.transpose((1, 2, 0))
-            masks = cv2.resize(masks, (width, height))
-            
-            # OpenCV resizes a (w,h,1) array to (s,s), so fix that
-            if len(masks.shape) == 2:
-                masks = np.expand_dims(masks, 0)
-            else:
-                masks = masks.transpose((2, 0, 1))
 
-            # Scale bounding boxes (which are currently absolute coordinates)
+        if self.resize_gt:
+            # ----- 마스크 리사이즈 -----
+            # (N, H, W) -> (H, W, N)로 바꿔서 OpenCV에 넣기
+            masks = masks.transpose((1, 2, 0))  # (H, W, N_objs)
+
+            cv_limit = 512
+            if masks.shape[2] <= cv_limit:
+                resized = cv2.resize(
+                    np.ascontiguousarray(masks),
+                    (width, height),
+                    interpolation=cv2.INTER_NEAREST
+                )
+                if resized.ndim == 2:  # 단일 채널이면 (H,W)로 나옴
+                    resized = resized[:, :, None]
+                masks = resized
+            else:
+                chunks = []
+                for i in range(0, masks.shape[2], cv_limit):
+                    chunk = np.ascontiguousarray(masks[:, :, i:i + cv_limit])
+                    res = cv2.resize(
+                        chunk,
+                        (width, height),
+                        interpolation=cv2.INTER_NEAREST
+                    )
+                    if res.ndim == 2:
+                        res = res[:, :, None]
+                    chunks.append(res)
+                masks = np.concatenate(chunks, axis=2)
+
+            # (H, W, N) -> (N, H, W)
+            masks = masks.transpose((2, 0, 1))
+
+            # ----- 박스 스케일 조정 (절대좌표인 상태) -----
             boxes[:, [0, 2]] *= (width  / img_w)
             boxes[:, [1, 3]] *= (height / img_h)
 
+        # ----- 너무 작은 박스 제거 -----
+        w = boxes[:, 2] - boxes[:, 0]
+        h = boxes[:, 3] - boxes[:, 1]
+        scale = cfg.max_size / 1024.0  # 원래 1024 기준이었다면
+        min_w = cfg.discard_box_width  * scale
+        min_h = cfg.discard_box_height * scale
+        keep = (w > min_w) & (h > min_h)
+        # print(f"[Resize] before={len(w)} kept={int(keep.sum())} "
+        #     f"thr=({cfg.discard_box_width},{cfg.discard_box_height}) "
+        #     f"minwh=({w.min() if len(w)>0 else -1:.3f},{h.min() if len(h)>0 else -1:.3f})")
+        masks = masks[keep]
+        boxes = boxes[keep]
+
+        if isinstance(labels, dict) and 'labels' in labels:
+            labels['labels'] = labels['labels'][keep]
+            labels['num_crowds'] = int((labels['labels'] < 0).sum())
+        # print(f"[DEBUG] Resize -> img_hw={img_h}x{img_w}, new size: {width}x{height}, preserve_ar={cfg.preserve_aspect_ratio}, max_size={cfg.max_size}")
         return image, masks, boxes, labels
 
 
@@ -308,7 +335,8 @@ class RandomSampleCrop(object):
         height, width, _ = image.shape
         while True:
             # randomly choose a mode
-            mode = random.choice(self.sample_options)
+            idx = np.random.randint(0, len(self.sample_options))
+            mode = self.sample_options[idx]
             if mode is None:
                 return image, masks, boxes, labels
 
@@ -453,6 +481,30 @@ class RandomMirror(object):
         return image, masks, boxes, labels
 
 
+class RandomFlip(object):
+    def __call__(self, image, masks, boxes, labels):
+        height , _ , _ = image.shape
+        if random.randint(2):
+            image = image[::-1, :]
+            masks = masks[:, ::-1, :]
+            boxes = boxes.copy()
+            boxes[:, 1::2] = height - boxes[:, 3::-2]
+        return image, masks, boxes, labels
+
+
+class RandomRot90(object):
+    def __call__(self, image, masks, boxes, labels):
+        old_height , old_width , _ = image.shape
+        k = random.randint(4)
+        image = np.rot90(image,k)
+        masks = np.array([np.rot90(mask,k) for mask in masks])
+        boxes = boxes.copy()
+        for _ in range(k):
+            boxes = np.array([[box[1], old_width - 1 - box[2], box[3], old_width - 1 - box[0]] for box in boxes])
+            old_width, old_height = old_height, old_width
+        return image, masks, boxes, labels
+
+
 class SwapChannels(object):
     """Transforms a tensorized image by swapping the channels in the order
      specified in the swap tuple.
@@ -582,8 +634,11 @@ class BaseTransform(object):
     def __init__(self, mean=MEANS, std=STD):
         self.augment = Compose([
             ConvertFromInts(),
-            Resize(resize_gt=False),
-            Pad(cfg.max_size, cfg.max_size, mean, pad_gt=False),
+            ToAbsoluteCoords(),
+            Resize(resize_gt=True),
+            # Resize(),
+            ToPercentCoords(),
+            PrepareMasks(cfg.mask_size, cfg.use_gt_bboxes),
             BackboneTransform(cfg.backbone.transform, mean, std, 'BGR')
         ])
 
@@ -612,10 +667,14 @@ class FastBaseTransform(torch.nn.Module):
         
         # img assumed to be a pytorch BGR image with channel order [n, h, w, c]
         if cfg.preserve_aspect_ratio:
-            raise NotImplementedError
+            _, h, w, _ = img.size()
+            img_size = Resize.calc_size_preserve_ar(w, h, cfg.max_size)
+            img_size = (img_size[1], img_size[0]) # Pytorch needs h, w
+        else:
+            img_size = (cfg.max_size, cfg.max_size)
 
         img = img.permute(0, 3, 1, 2).contiguous()
-        img = F.interpolate(img, (cfg.max_size, cfg.max_size), mode='bilinear', align_corners=False)
+        img = F.interpolate(img, img_size, mode='bilinear', align_corners=False)
 
         if self.transform.normalize:
             img = (img - self.mean) / self.std
@@ -646,12 +705,14 @@ class SSDAugmentation(object):
         self.augment = Compose([
             ConvertFromInts(),
             ToAbsoluteCoords(),
-            enable_if(cfg.augment_photometric_distort, PhotometricDistort()),
-            enable_if(cfg.augment_expand, Expand(mean)),
-            enable_if(cfg.augment_random_sample_crop, RandomSampleCrop()),
-            enable_if(cfg.augment_random_mirror, RandomMirror()),
+            #enable_if(cfg.augment_photometric_distort, PhotometricDistort()),
+            #enable_if(cfg.augment_expand, Expand(mean)),
+            #enable_if(cfg.augment_random_sample_crop, RandomSampleCrop()),
+            #enable_if(cfg.augment_random_mirror, RandomMirror()),
+            # enable_if(cfg.augment_random_flip, RandomFlip()),
+            #enable_if(cfg.augment_random_flip, RandomRot90()),
             Resize(),
-            Pad(cfg.max_size, cfg.max_size, mean),
+            #enable_if(not cfg.preserve_aspect_ratio, Pad(cfg.max_size, cfg.max_size, mean)),
             ToPercentCoords(),
             PrepareMasks(cfg.mask_size, cfg.use_gt_bboxes),
             BackboneTransform(cfg.backbone.transform, mean, std, 'BGR')
