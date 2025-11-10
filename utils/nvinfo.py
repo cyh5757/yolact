@@ -10,7 +10,7 @@ def gpu_info() -> list:
     Adapted from nvgpu: https://pypi.org/project/nvgpu/, but mine has more info.
     """
     gpus = [line for line in _run_cmd(['nvidia-smi', '-L']) if line]
-    gpu_infos = [re.match('GPU ([0-9]+): ([^(]+) \(UUID: ([^)]+)\)', gpu).groups() for gpu in gpus]
+    gpu_infos = [re.match(r'GPU ([0-9]+): ([^(]+) \(UUID: ([^)]+)\)', gpu).groups() for gpu in gpus]
     gpu_infos = [dict(zip(['idx', 'name', 'uuid'], info)) for info in gpu_infos]
     gpu_count = len(gpus)
 
@@ -52,8 +52,6 @@ def visible_gpus() -> list:
         return list(range(len(gpu_info())))
     else:
         return [int(x.strip()) for x in os.environ['CUDA_VISIBLE_DEVICES'].split(',')]
-
-
 
 
 def _run_cmd(cmd:list) -> list:

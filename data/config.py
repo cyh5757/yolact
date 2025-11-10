@@ -736,7 +736,7 @@ cell_yolact_im700_config = yolact_im700_config.copy({
         'use_square_anchors': True,
         'pred_aspect_ratios': [ [[1, 1/2, 2]] ] * 5,
         # 1024 해상도 기준 소물체 대응용으로 16 추가
-        'pred_scales': [[8], [24], [48], [96], [384]],  # 필요 시 [384] 복원 가능
+        'pred_scales': [[8], [24], [48], [384], [768]],  # 필요 시 [384] 복원 가능
     }),
 
     # --------- 학습 길이/디버그 ---------
