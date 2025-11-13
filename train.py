@@ -5,6 +5,7 @@
 # train.py (YOLACT – EarlyStopping + Best/Last-Checkpoint + Robust mAP pick + Pro scalars)
 # -----------------------------
 
+from torch.cpu import is_available
 from data import *
 from utils.augmentations import SSDAugmentation, BaseTransform
 from utils.functions import MovingAverage, SavePath
@@ -23,6 +24,7 @@ from torch.autograd import Variable
 import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 import torch.backends.cudnn as cudnn
 import torch.utils.data as data
 import numpy as np
@@ -73,7 +75,7 @@ parser.add_argument('--log_folder', default='logs/')
 parser.add_argument('--config', default=None)
 parser.add_argument('--save_interval', default=10000, type=int)
 
-parser.add_argument('--validation_size', default=5000, type=int)
+parser.add_argument('--validation_size', default=10, type=int)
 parser.add_argument('--validation_epoch', default=2, type=int,
                     help='If -1, no validation.')
 
@@ -675,17 +677,27 @@ def compute_validation_map(epoch, iteration, yolact_net, dataset, log:Log=None, 
         f'--export_coco={export_json}',
         f'--coco_images_dir={cfg.dataset.valid_images}',
         f'--coco_ann_file={cfg.dataset.valid_info}',
-        f'--metrics_csv={metrics_csv}'
+        f'--metrics_csv={metrics_csv}',
+        '--compute_aji=False',  # Disable expensive AJI computation during training
+        '--profile_infer=False',  # Disable profiler during training validation
+        '--model_stats=False',  # Disable model stats during training validation
     ]
     eval_script.parse_args(eval_args)
     eval_script.prep_coco_cats()
 
     with torch.no_grad():
         yolact_net.eval()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats()
         start = time.time()
         print("\nComputing validation mAP (this may take a while)...", flush=True)
         val_info = eval_script.evaluate(yolact_net, dataset, train_mode=True)
         end = time.time()
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         if log is not None:
             log.log('val', val_info, elapsed=(end - start), epoch=epoch, iter=iteration)
         if wandb_logger is not None:
@@ -982,7 +994,7 @@ def train():
     scheduler = None
     if use_cosine:
         tmax = max(1, cfg.max_iter - cfg.lr_warmup_until)
-        scheduler = CosineAnnealingLR(optimizer, T_max=tmax)
+        scheduler = CosineAnnealingLR(optimizer, T_max=tmax,eta_min=2e-5)
 
     _dump_effective_run(
         _paths['exp_dir'], args, cfg,
