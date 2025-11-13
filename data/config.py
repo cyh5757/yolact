@@ -713,7 +713,7 @@ cell_yolact_im700_config = yolact_im700_config.copy({
 
     # --------- 마스크/프로토 관련 ---------
     'mask_type': mask_type.lincomb,             # 세포 도메인 권장
-    'mask_size': 28,                            # 16 → 28 경계 손실 완화
+    'mask_size': 128,                            # 16 → 28 경계 손실 완화 - direct 일때만 사용
     'mask_proto_src': 0,
     'mask_proto_net': [(256, 3, {'padding': 1})] * 3 + [(None, -2, {}), (256, 3, {'padding': 1})] + [(32, 1, {})],
     'mask_proto_normalize_emulate_roi_pooling': True,
@@ -734,9 +734,15 @@ cell_yolact_im700_config = yolact_im700_config.copy({
         'use_pixel_scales': True,
         'preapply_sqrt': False,
         'use_square_anchors': True,
-        'pred_aspect_ratios': [ [[1, 1/2, 2]] ] * 5,
+        'pred_aspect_ratios': [ [[0.65, 0.84, 1.0, 2.1]] ] * 5,
         # 1024 해상도 기준 소물체 대응용으로 16 추가
-        'pred_scales': [[8], [24], [48], [96], [384]],  # 필요 시 [384] 복원 가능
+        'pred_scales': [
+            [32, 48, 64],          # P3 (작게)
+            [96, 128, 160],        # P4
+            [192, 256, 320],       # P5
+            [384, 448, 512],       # P6
+            [640, 768, 896],       # P7 (라지 목표)
+        ],
     }),
 
     # --------- 학습 길이/디버그 ---------

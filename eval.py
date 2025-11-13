@@ -1,4 +1,16 @@
-# eval.py
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+# =============================
+# eval.py (YOLACT – extended + optimized)
+# - COCO 평가 + 시각화
+# - per-image 프로파일(FPS/메모리)
+# - Params / FLOPs / FPS 요약 + CSV
+# - AJI (Aggregated Jaccard Index) 계산 추가
+# - size-bucket(AP_s/m/l) CSV 기록 시 AJI 함께 기록
+# - train_mode 최적화 추가
+# =============================
+
 from data import COCODetection, get_label_map, MEANS, COLORS
 from yolact import Yolact
 from utils.augmentations import BaseTransform, FastBaseTransform
@@ -31,14 +43,15 @@ from pathlib import Path
 from collections import OrderedDict
 import cv2
 import matplotlib.pyplot as plt
-import csv  # NEW
+import csv  # CSV 기록
+from typing import Optional, Tuple
 
-# NEW: COCOeval for size-bucket AP
+# COCOeval for size-bucket AP
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 
 
-import random, numpy as np, torch
+# ----------------- Repro -----------------
 def set_seed(s=1337):
     random.seed(s); np.random.seed(s); torch.manual_seed(s); torch.cuda.manual_seed_all(s)
     torch.backends.cudnn.deterministic = True
@@ -56,6 +69,7 @@ def str2bool(v):
         raise argparse.ArgumentTypeError('Boolean value expected.')
 
 
+# ----------------- CLI -----------------
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description='YOLACT COCO Evaluation')
     parser.add_argument('--trained_model', default='weights/ssd300_mAP_77.43_v2.pth', type=str)
@@ -73,7 +87,7 @@ def parse_args(argv=None):
     parser.add_argument('--resume', dest='resume', action='store_true')
     parser.add_argument('--max_images', default=-1, type=int)
 
-    # 기존 COCO 결과(분리된 bbox/mask 파일) 내보내기 플래그
+    # COCO 결과 내보내기
     parser.add_argument('--output_coco_json', dest='output_coco_json', action='store_true')
     parser.add_argument('--bbox_det_file', default='results/bbox_detections.json', type=str)
     parser.add_argument('--mask_det_file', default='results/mask_detections.json', type=str)
@@ -98,26 +112,30 @@ def parse_args(argv=None):
     parser.add_argument('--display_fps', default=False, dest='display_fps', action='store_true')
     parser.add_argument('--emulate_playback', default=False, dest='emulate_playback', action='store_true')
 
-    # NEW: 외부 COCO 경로 오버라이드 & 단일 COCO 결과 파일 내보내기
-    parser.add_argument('--coco_images_dir', default=None, type=str,
-                        help='COCO images dir override, e.g. /home/.../images/val')
-    parser.add_argument('--coco_ann_file', default=None, type=str,
-                        help='COCO annotation file override, e.g. /home/.../annotations/instances_val.json')
-    parser.add_argument('--export_coco', default=None, type=str,
-                        help='Write combined COCO-style detection results (usually masks) to this path '
-                             '(e.g., /home/.../annotations/preds_instances_val.json).')
+    # 외부 COCO 경로 오버라이드 & 단일 COCO 결과 파일
+    parser.add_argument('--coco_images_dir', default=None, type=str)
+    parser.add_argument('--coco_ann_file', default=None, type=str)
+    parser.add_argument('--export_coco', default=None, type=str)
 
-    # NEW: metrics.csv 경로
-    parser.add_argument('--metrics_csv', default=None, type=str,
-                        help='Append AP_all/AP_small/AP_medium/AP_large to this CSV.')
+    # metrics.csv (AP_s/m/l + AJI 같이 기록)
+    parser.add_argument('--metrics_csv', default=None, type=str)
 
-    # NEW: Inference profiler options
-    parser.add_argument('--profile_infer', type=str2bool, default=True,
-                        help='이미지당 추론 지연시간/메모리 프로파일.')
-    parser.add_argument('--profile_warmup', type=int, default=2,
-                        help='워밍업으로 건너뛸 이미지 수.')
-    parser.add_argument('--profile_csv', type=str, default=None,
-                        help='프로파일 결과를 CSV로 저장할 경로. 예) /path/to/profile.csv')
+    # Inference profiler options
+    parser.add_argument('--profile_infer', type=str2bool, default=True)
+    parser.add_argument('--profile_warmup', type=int, default=2)
+    parser.add_argument('--profile_csv', type=str, default=None)
+
+    # Model Stats (Params / FLOPs / Throughput)
+    parser.add_argument('--model_stats', type=str2bool, default=True)
+    parser.add_argument('--flops_hw', type=str, default=None)   # 예: 700x700
+    parser.add_argument('--flops_use_dummy', type=str2bool, default=True)
+    parser.add_argument('--stats_csv', type=str, default=None)
+
+    # AJI 옵션
+    parser.add_argument('--compute_aji', type=str2bool, default=True,
+                        help='평가 중 AJI 계산(세포/핵 데이터 권장)')
+    parser.add_argument('--aji_mask_thresh', type=float, default=0.5,
+                        help='예측 마스크를 이진화할 임계값')
 
     parser.set_defaults(no_bar=False, display=False, resume=False, output_coco_json=False, output_web_json=False,
                         shuffle=False, benchmark=False, no_sort=False, no_hash=False, mask_proto_debug=False,
@@ -128,15 +146,13 @@ def parse_args(argv=None):
 
     if args.output_web_json:
         args.output_coco_json = True
-
     if args.export_coco and not args.output_coco_json:
-        # export_coco 요청 시 내부 COCO 출력 로직 활성화
         args.output_coco_json = True
-
     if args.seed is not None:
         random.seed(args.seed)
 
 
+# ----------------- Globals -----------------
 iou_thresholds = [x / 100 for x in range(50, 100, 5)]
 coco_cats = {}
 coco_cats_inv = {}
@@ -158,6 +174,7 @@ def get_transformed_cat(coco_cat_id):
     return coco_cats_inv[coco_cat_id]
 
 
+# ----------------- Visualization -----------------
 def prep_display(dets_out, img, h, w, undo_transform=True, class_color=False, mask_alpha=0.45, fps_str=''):
     device = torch.device('cuda' if (args.cuda and torch.cuda.is_available()) else 'cpu')
 
@@ -189,7 +206,6 @@ def prep_display(dets_out, img, h, w, undo_transform=True, class_color=False, ma
             break
 
     def get_color(j, on_gpu_device=None):
-        global color_cache
         color_idx = (classes[j] * 5 if class_color else j * 5) % len(COLORS)
         color = COLORS[color_idx]
         if not undo_transform:
@@ -251,6 +267,7 @@ def prep_display(dets_out, img, h, w, undo_transform=True, class_color=False, ma
     return img_numpy
 
 
+# ----------------- Eval Utils -----------------
 def _mask_iou(mask1, mask2, iscrowd=False):
     with timer.env('Mask IoU'):
         ret = mask_iou(mask1, mask2, iscrowd)
@@ -289,16 +306,15 @@ class Detections:
         })
 
     def dump(self):
-        # 기존: bbox/mask 분리 저장
+        # bbox/mask 분리 저장
         for data, path in [(self.bbox_data, args.bbox_det_file), (self.mask_data, args.mask_det_file)]:
             if path:
                 os.makedirs(os.path.dirname(path), exist_ok=True)
                 with open(path, 'w') as f:
                     json.dump(data, f)
 
-        # NEW: 단일 COCO 파일(보통 mask 중심)을 원하는 경로에 저장
+        # 단일 COCO 파일(보통 mask 중심)
         if getattr(args, 'export_coco', None):
-            # 세포 도메인에서는 mask가 핵심이므로 mask_data를 기본으로 사용
             results = self.mask_data
             os.makedirs(os.path.dirname(args.export_coco), exist_ok=True)
             with open(args.export_coco, 'w') as f:
@@ -306,18 +322,125 @@ class Detections:
             print(f'[OK] Exported COCO-style results to: {args.export_coco}')
 
 
-def prep_metrics(ap_data, dets, img, gt, gt_masks, h, w, num_crowd, image_id, detections: Detections = None):
+# ----------------- AJI -----------------
+class AJIAccumulator:
+    """
+    Dataset-level AJI 누적기.
+    표준 AJI(= greedily matched pairs의 intersection 합 / union 합(+unmatched preds))
+    """
+    def __init__(self, thr: float = 0.5):
+        self.num_sum = 0.0
+        self.den_sum = 0.0
+        self.thr = float(thr)
+
+    @staticmethod
+    def _pairwise_iou(gt_bin, pr_bin):
+        """
+        gt_bin: (Ng, H, W) bool
+        pr_bin: (Np, H, W) bool
+        return: (Ng, Np) IoU matrix
+        """
+        if gt_bin.size == 0 or pr_bin.size == 0:
+            return np.zeros((gt_bin.shape[0], pr_bin.shape[0]), dtype=np.float32)
+        Ng, H, W = gt_bin.shape
+        Np = pr_bin.shape[0]
+        gt_flat = gt_bin.reshape(Ng, -1).astype(np.uint8)
+        pr_flat = pr_bin.reshape(Np, -1).astype(np.uint8)
+        inter = (gt_flat[:, None, :] & pr_flat[None, :, :]).sum(axis=2).astype(np.float64)
+        area_g = gt_flat.sum(axis=1).astype(np.float64)[:, None]
+        area_p = pr_flat.sum(axis=1).astype(np.float64)[None, :]
+        union = area_g + area_p - inter
+        with np.errstate(divide='ignore', invalid='ignore'):
+            iou = np.where(union > 0.0, inter / union, 0.0)
+        return iou
+
+    def add_image(self, gt_masks_hw: np.ndarray, pred_masks_hw: np.ndarray):
+        """
+        gt_masks_hw: (Ng, H, W) {0,1}
+        pred_masks_hw: (Np, H, W) float or {0,1}; 내부에서 이진화
+        """
+        if pred_masks_hw.dtype != np.uint8 and pred_masks_hw.dtype != np.bool_:
+            pred_masks_hw = (pred_masks_hw >= self.thr).astype(np.uint8)
+        else:
+            pred_masks_hw = (pred_masks_hw > 0).astype(np.uint8)
+        gt_masks_hw = (gt_masks_hw > 0).astype(np.uint8)
+
+        Ng = gt_masks_hw.shape[0]
+        Np = pred_masks_hw.shape[0]
+        if Ng == 0 and Np == 0:
+            return
+        if Ng == 0:
+            # GT가 없다면 분모에 pred 영역만 들어감 (분자 0)
+            self.num_sum += 0.0
+            self.den_sum += float(pred_masks_hw.sum())
+            return
+        if Np == 0:
+            # Pred가 없다면 분자 0, 분모에 gt 영역만
+            self.num_sum += 0.0
+            self.den_sum += float(gt_masks_hw.sum())
+            return
+
+        iou = self._pairwise_iou(gt_masks_hw, pred_masks_hw)
+
+        # Greedy matching: 매번 최대 IoU 쌍을 선택 (IoU==0이면 종료)
+        used_g = set()
+        used_p = set()
+        inter_sum = 0.0
+        union_sum = 0.0
+
+        while True:
+            # 남은 쌍 중 최대 IoU 찾기
+            max_i, max_j, max_v = -1, -1, 0.0
+            for gi in range(Ng):
+                if gi in used_g: continue
+                for pj in range(Np):
+                    if pj in used_p: continue
+                    v = iou[gi, pj]
+                    if v > max_v:
+                        max_v = v; max_i = gi; max_j = pj
+            if max_v <= 0.0:  # 더 매칭할 게 없음
+                break
+
+            # 매칭된 쌍의 inter/union 재계산
+            g = gt_masks_hw[max_i].astype(np.uint8)
+            p = pred_masks_hw[max_j].astype(np.uint8)
+            inter = int((g & p).sum())
+            union = int((g | p).sum())
+            inter_sum += inter
+            union_sum += union
+            used_g.add(max_i); used_p.add(max_j)
+
+        # 남은 unmatched GT는 분모에 영역을 더함 (분자는 0)
+        for gi in range(Ng):
+            if gi not in used_g:
+                union_sum += int(gt_masks_hw[gi].sum())
+
+        # 남은 unmatched Pred도 분모에 영역을 더함
+        for pj in range(Np):
+            if pj not in used_p:
+                union_sum += int(pred_masks_hw[pj].sum())
+
+        self.num_sum += inter_sum
+        self.den_sum += max(union_sum, 1.0)
+
+    def value(self):
+        if self.den_sum <= 0.0:
+            return 0.0
+        return float(self.num_sum / self.den_sum)
+
+
+def prep_metrics(ap_data, dets, img, gt, gt_masks, h, w, num_crowd, image_id,
+                 detections: Detections = None,
+                 aji_acc: AJIAccumulator = None):
     device = torch.device('cuda' if (args.cuda and torch.cuda.is_available()) else 'cpu')
 
-    # transform 후 실제 이미지 크기 확인 (img는 (C, H, W) 형태)
+    # transform 후 실제 이미지 크기 (img: (C,H,W))
     img_h, img_w = img.shape[1], img.shape[2]
-    
-    # 미리 None으로 초기화 (스코프 보장)
+
     crowd_boxes = crowd_masks = crowd_classes = None
 
-    # --- GT는 JSON 덤프 여부와 무관하게 항상 준비 ---
+    # --- GT 준비 ---
     with timer.env('Prepare gt'):
-        # gt_boxes는 원본 크기 기준 좌표이므로 원본 크기로 스케일링
         gt_boxes = torch.tensor(gt[:, :4], dtype=torch.float32, device=device)
         gt_boxes[:, [0, 2]] *= w
         gt_boxes[:, [1, 3]] *= h
@@ -331,28 +454,28 @@ def prep_metrics(ap_data, dets, img, gt, gt_masks, h, w, num_crowd, image_id, de
         else:
             gt_masks = gt_masks.detach().clone().to(torch.float32).to(device)
 
-        # gt_masks는 transform 후 크기이므로 img_h, img_w 사용
+        # img_h, img_w 기준으로 reshape
         if len(gt_masks.shape) == 3:
-            # (num_masks, height, width) 형태
             num_masks, mask_h, mask_w = gt_masks.shape
-            gt_masks = gt_masks.view(num_masks, mask_h * mask_w)
+            gt_masks_vec = gt_masks.view(num_masks, mask_h * mask_w)
         else:
-            # (num_masks, height * width) 형태
-            gt_masks = gt_masks.view(-1, img_h * img_w)
+            gt_masks_vec = gt_masks.view(-1, img_h * img_w)
 
         if num_crowd > 0:
             split = lambda x: (x[-num_crowd:], x[:-num_crowd])
             crowd_boxes, gt_boxes = split(gt_boxes)
-            crowd_masks, gt_masks = split(gt_masks)
+            crowd_masks, gt_masks_vec = split(gt_masks_vec)
             crowd_classes, gt_classes = split(gt_classes)
 
     with timer.env('Postprocess'):
-        # postprocess에 transform 후 크기 전달 (masks를 올바른 크기로 생성)
         classes, scores, boxes, masks = postprocess(
             dets, img_w, img_h, crop_masks=args.crop, score_threshold=args.score_threshold
         )
         if classes.size(0) == 0:
-            # JSON만 원해도 비어있으면 그냥 끝
+            # AJI도 0/분모만 더해짐 (unmatched gt만 있을 때는 evaluate()에서 다음 이미지로)
+            if aji_acc is not None:
+                aji_acc.add_image(gt_masks.view(-1, img_h, img_w).detach().cpu().numpy(),
+                                  np.zeros((0, img_h, img_w), dtype=np.uint8))
             return
 
         classes = list(classes.detach().to('cpu').numpy().astype(int))
@@ -364,32 +487,29 @@ def prep_metrics(ap_data, dets, img, gt, gt_masks, h, w, num_crowd, image_id, de
             box_scores = scores
             mask_scores = scores
 
-        # masks는 이미 (num_dets, img_h, img_w) 형태
-        masks = masks.to(device=device).view(-1, img_h * img_w)
-        # boxes는 이미 img_w, img_h 기준으로 sanitize되어 있음
+        masks_flat = masks.to(device=device).view(-1, img_h * img_w)
         boxes = boxes.to(device=device)
 
     # --- JSON 덤프 ---
     if args.output_coco_json:
         with timer.env('JSON Output'):
             boxes_np = boxes.detach().to('cpu').numpy()
-            masks_np = masks.view(-1, img_h, img_w).detach().to('cpu').numpy()
+            masks_np = masks_flat.view(-1, img_h, img_w).detach().to('cpu').numpy()
             for i in range(masks_np.shape[0]):
                 if (boxes_np[i, 3] - boxes_np[i, 1]) * (boxes_np[i, 2] - boxes_np[i, 0]) > 0:
                     detections.add_bbox(image_id, classes[i], boxes_np[i, :], box_scores[i])
                     detections.add_mask(image_id, classes[i], masks_np[i, :, :], mask_scores[i])
-        # 여기서 return 하던 것을 제거하여 AP 누적 경로로 계속 진행
 
     # ====== 평가 경로 (AP 계산) ======
     with timer.env('Eval Setup'):
         num_pred = len(classes)
 
         bbox_iou_cache = jaccard(boxes.float(), gt_boxes.float()).cpu()
-        mask_iou_cache = mask_iou(masks, gt_masks).cpu()
+        mask_iou_cache = mask_iou(masks_flat, gt_masks_vec).cpu()
 
         if num_crowd > 0 and (crowd_boxes is not None) and (crowd_masks is not None):
             crowd_bbox_iou_cache = jaccard(boxes.float(), crowd_boxes.float(), iscrowd=True).cpu()
-            crowd_mask_iou_cache = mask_iou(masks, crowd_masks, iscrowd=True).cpu()
+            crowd_mask_iou_cache = mask_iou(masks_flat, crowd_masks, iscrowd=True).cpu()
         else:
             crowd_bbox_iou_cache = crowd_mask_iou_cache = None
 
@@ -421,19 +541,15 @@ def prep_metrics(ap_data, dets, img, gt, gt_masks, h, w, num_crowd, image_id, de
                 for i in indices:
                     if classes[i] != _class:
                         continue
-
                     max_iou_found = iou_threshold
                     max_match_idx = -1
-
                     for j in range(len(gt_classes)):
                         if gt_used[j] or gt_classes[j] != _class:
                             continue
-
                         iou = iou_func(i, j)
                         if iou > max_iou_found:
                             max_iou_found = iou
                             max_match_idx = j
-
                     if max_match_idx >= 0:
                         gt_used[max_match_idx] = True
                         ap_obj.push(score_func(i), True)
@@ -450,6 +566,12 @@ def prep_metrics(ap_data, dets, img, gt, gt_masks, h, w, num_crowd, image_id, de
                         if not matched_crowd:
                             ap_obj.push(score_func(i), False)
     timer.stop('Main loop')
+
+    # ====== AJI 누적 ======
+    if aji_acc is not None:
+        gt_np = gt_masks.view(-1, img_h, img_w).detach().cpu().numpy()
+        pr_np = masks_flat.view(-1, img_h, img_w).detach().cpu().numpy()
+        aji_acc.add_image(gt_np, pr_np)
 
 
 class APDataObject:
@@ -488,6 +610,7 @@ class APDataObject:
         return sum(y_range) / len(y_range)
 
 
+# ----------------- Single/Folder Eval -----------------
 def badhash(x):
     x = (((x >> 16) ^ x) * 0x045d9f3b) & 0xFFFFFFFF
     x = (((x >> 16) ^ x) * 0x045d9f3b) & 0xFFFFFFFF
@@ -525,7 +648,7 @@ def evalimages(net: Yolact, input_folder: str, output_folder: str):
     print('Done.')
 
 
-# NEW: COCOeval로 size-bucket AP 계산
+# ----------------- COCOeval Size Buckets -----------------
 def _eval_size_buckets(ann_file: str, det_file: str, iouType: str = 'segm'):
     coco_gt = COCO(ann_file)
     coco_dt = coco_gt.loadRes(det_file)
@@ -552,7 +675,7 @@ def _eval_size_buckets(ann_file: str, det_file: str, iouType: str = 'segm'):
     return ap_all, out['small'], out['medium'], out['large']
 
 
-# ---------- Inference Profiler ----------
+# ----------------- Inference Profiler -----------------
 class InferProfiler:
     def __init__(self, device='cpu'):
         self.device = device
@@ -604,7 +727,6 @@ class InferProfiler:
 
     def to_csv(self, path):
         if not self.rows: return
-        import csv, os
         os.makedirs(os.path.dirname(path), exist_ok=True)
         keys = list(self.rows[0].keys())
         with open(path, 'w', newline='', encoding='utf-8') as f:
@@ -613,24 +735,114 @@ class InferProfiler:
             w.writerows(self.rows)
 
 
+# ----------------- Params / FLOPs -----------------
+def count_params(model, trainable_only=False):
+    if trainable_only:
+        return sum(p.numel() for p in model.parameters() if p.requires_grad)
+    return sum(p.numel() for p in model.parameters())
+
+def _parse_hw(s: Optional[str], default: Optional[Tuple[int, int]] = None):
+    if not s:
+        return default
+    if 'x' in s.lower():
+        h, w = s.lower().split('x')
+        return int(h), int(w)
+    v = int(s)
+    return (v, v)
+
+def try_measure_flops(model, hw=(550, 550), device='cpu'):
+    """
+    FLOPs 계산을 thop 또는 fvcore로 시도. 실패 시 None 반환.
+    - 모델 forward 만 카운트 (postprocess 제외)
+    """
+    model_device = next(model.parameters()).device
+    H, W = hw
+    dummy = torch.randn(1, 3, H, W, device=model_device)
+
+    # 1) thop
+    try:
+        import thop
+        macs, _params = thop.profile(model, inputs=(dummy,), verbose=False)
+        return float(macs) / 1e9
+    except Exception:
+        pass
+
+    # 2) fvcore
+    try:
+        from fvcore.nn import FlopCountAnalysis
+        model.eval()
+        with torch.no_grad():
+            flops = FlopCountAnalysis(model, dummy).total()
+        return float(flops) / 1e9
+    except Exception:
+        pass
+
+    return None
+
+def print_model_stats(model, hw=None, device='cpu', stats_csv=None, fps_from_prof=None):
+    total = count_params(model, trainable_only=False)
+    trainable = count_params(model, trainable_only=True)
+
+    # HxW 결정
+    if hw is None:
+        side = getattr(cfg, 'max_size', None)
+        if side is None:
+            side = 550
+        hw = (int(side), int(side))
+
+    flops_g = try_measure_flops(model, hw=hw, device=device)
+
+    print('\n[MODEL STATS]')
+    print(f' - Params (total): {total:,}  ({total/1e6:.3f} M)')
+    print(f' - Params (trainable): {trainable:,}  ({trainable/1e6:.3f} M)')
+    if flops_g is not None:
+        print(f' - FLOPs: {flops_g:.3f} G  @ input {hw[0]}x{hw[1]}')
+    else:
+        print(f' - FLOPs: (계산 실패)  @ input {hw[0]}x{hw[1]}  → thop 또는 fvcore 설치 권장')
+
+    if fps_from_prof is not None:
+        print(f' - Throughput (eval): {fps_from_prof:.2f} images/sec')
+
+    # CSV 기록 (옵션)
+    if stats_csv:
+        os.makedirs(os.path.dirname(stats_csv), exist_ok=True)
+        row = {
+            'config': getattr(cfg, 'name', 'NA'),
+            'input_h': hw[0],
+            'input_w': hw[1],
+            'params_m': round(total/1e6, 6),
+            'params_trainable_m': round(trainable/1e6, 6),
+            'flops_g': (round(flops_g, 6) if flops_g is not None else None),
+            'throughput_img_per_s': (round(float(fps_from_prof), 4) if fps_from_prof is not None else None),
+        }
+        write_header = not os.path.exists(stats_csv) or os.path.getsize(stats_csv) == 0
+        with open(stats_csv, 'a', newline='') as f:
+            w = csv.DictWriter(f, fieldnames=list(row.keys()))
+            if write_header:
+                w.writeheader()
+            w.writerow(row)
+        print(f'[MODEL STATS] saved CSV → {stats_csv}')
+
+
+# ----------------- Main Evaluation -----------------
 def evaluate(net: Yolact, dataset, train_mode=False):
     """
     Returns:
       maps: dict 형태. 예) {
         'box':  {'AP': ..., 'AP50': ..., 'AP75': ..., ...},
-        'mask': {'AP': ..., 'AP50': ..., 'AP75': ..., ...}
+        'mask': {'AP': ..., 'AP50': ..., 'AP75': ..., ...},
+        'AJI':  0.73,   # 추가
+        '_profile': { ... }  # (선택) 프로파일 요약
       }
-      특수 모드(display/benchmark/image export)에서도 항상 dict를 반환하도록 보장.
     """
-    # 0) 방어: COCO 카테고리 매핑 준비
+    # COCO 카테고리 매핑 준비
     try:
-        if not coco_cats:   # 전역 dict 비어있으면
+        if not coco_cats:
             prep_coco_cats()
     except NameError:
-        # 일부 분기에서 전역 미정의인 경우 대비
         prep_coco_cats()
 
-    maps = {}  # ← None 금지. 최소한 빈 dict 반환.
+    maps = {}
 
     device = torch.device('cuda' if (args.cuda and torch.cuda.is_available()) else 'cpu')
 
@@ -638,7 +850,17 @@ def evaluate(net: Yolact, dataset, train_mode=False):
     net.detect.use_cross_class_nms = args.cross_class_nms
     cfg.mask_proto_debug = args.mask_proto_debug
 
-    # 1) 단발 이미지/폴더 모드는 시각화/저장만 하고 종료
+    # ===== 수정 1: train_mode일 때 더 가벼운 실행 =====
+    if train_mode:
+        print("[Val] Running in train_mode (lighter evaluation)", flush=True)
+        timer.disable_all()  # 타이머 오버헤드 제거
+        # train_mode에서는 프로파일링과 AJI를 비활성화
+        original_profile = args.profile_infer
+        original_aji = args.compute_aji
+        args.profile_infer = False
+        args.compute_aji = False
+
+    # 1) 단발 이미지/폴더 모드는 시각화/저장만
     if args.image is not None:
         if ':' in args.image:
             inp, out = args.image.split(':')
@@ -656,7 +878,9 @@ def evaluate(net: Yolact, dataset, train_mode=False):
     frame_times = MovingAverage()
     dataset_size = len(dataset) if args.max_images < 0 else min(args.max_images, len(dataset))
     progress_bar = ProgressBar(30, dataset_size)
-    print()
+    
+    if not train_mode:
+        print()
 
     if not args.display and not args.benchmark:
         global ap_data
@@ -665,8 +889,10 @@ def evaluate(net: Yolact, dataset, train_mode=False):
             'mask': [[APDataObject() for _ in cfg.dataset.class_names] for _ in iou_thresholds],
         }
         detections = Detections()
+        aji_acc = AJIAccumulator(thr=args.aji_mask_thresh) if args.compute_aji else None
     else:
         timer.disable('Load Data')
+        aji_acc = None
 
     # 3) 프로파일러
     profiler = InferProfiler(device='cuda' if (args.cuda and torch.cuda.is_available()) else 'cpu') if args.profile_infer else None
@@ -682,22 +908,32 @@ def evaluate(net: Yolact, dataset, train_mode=False):
 
     try:
         for it, image_idx in enumerate(dataset_indices):
+            # ===== 수정 2: 진행상황 더 자주 출력 =====
+            if train_mode and it % 5 == 0:
+                print(f"\r[Val] Processing {it+1}/{dataset_size}...", end='', flush=True)
+            
             timer.reset()
+            
+            # ===== 수정 3: CUDA 캐시 정리 빈도 감소 =====
+            if torch.cuda.is_available() and it > 0 and it % 20 == 0:  # 5 → 20으로 변경
+                torch.cuda.empty_cache()
+            
             with timer.env('Load Data'):
                 img, gt, gt_masks, h, w, num_crowd = dataset.pull_item(image_idx)
 
-                # 변환 이후 텐서 사이즈로 h,w 보정
                 if torch.is_tensor(img):
                     th, tw = int(img.shape[-2]), int(img.shape[-1])
                     if (h is not None and w is not None) and (th != h or tw != w):
-                        print(f"[WARN] eval: orig_hw={h}x{w} but transformed={th}x{tw} — using transformed.")
-                    h, w = th, tw
+                        if it == 0 and not train_mode:  # 첫 이미지만 경고 (train_mode가 아닐 때만)
+                            print(f"\n[WARN] eval: orig_hw={h}x{w} but transformed={th}x{tw}")
+                        h, w = th, tw
 
                 batch = img.unsqueeze(0).to(device=device, dtype=torch.float32)
 
-            # 프로파일 시작
-            ram_before = profiler.ram_rss_mb() if profiler else None
-            if profiler:
+            # ===== 수정 4: 프로파일링 간소화 =====
+            ram_before = None
+            if profiler and not train_mode:  # train_mode에서는 스킵
+                ram_before = profiler.ram_rss_mb()
                 profiler.reset_gpu_peak()
                 if profiler.has_cuda:
                     torch.cuda.synchronize()
@@ -706,8 +942,7 @@ def evaluate(net: Yolact, dataset, train_mode=False):
             with timer.env('Network Extra'):
                 preds = net(batch)
 
-            # 프로파일 종료 기록
-            if profiler:
+            if profiler and not train_mode and ram_before is not None:
                 if profiler.has_cuda:
                     torch.cuda.synchronize()
                 t1 = time.perf_counter()
@@ -716,18 +951,21 @@ def evaluate(net: Yolact, dataset, train_mode=False):
                     profiler.record(
                         image_id=int(dataset.ids[image_idx]) if hasattr(dataset, 'ids') else it,
                         latency_s=(t1 - t0),
-                        ram_mb_before=(ram_before if ram_before is not None else 0.0),
-                        ram_mb_after=(ram_after if ram_before is not None else 0.0)
+                        ram_mb_before=ram_before,
+                        ram_mb_after=ram_after
                     )
 
-            # 후처리/메트릭 적재
+            # 후처리/메트릭
             if args.display:
                 img_numpy = prep_display(preds, img, h, w)
             elif args.benchmark:
                 with timer.env('Postprocess'):
                     postprocess(preds, w, h, crop_masks=args.crop, score_threshold=args.score_threshold)
             else:
-                prep_metrics(ap_data, preds, img, gt, gt_masks, h, w, num_crowd, dataset.ids[image_idx], detections)
+                # ===== 수정 5: AJI는 train_mode에서 비활성화 =====
+                aji_to_use = None if train_mode else aji_acc
+                prep_metrics(ap_data, preds, img, gt, gt_masks, h, w, num_crowd,
+                             dataset.ids[image_idx], detections, aji_acc=aji_to_use)
 
             if it > 1:
                 frame_times.add(timer.total_time())
@@ -739,45 +977,58 @@ def evaluate(net: Yolact, dataset, train_mode=False):
                 plt.imshow(img_numpy[:, :, (2, 1, 0)])
                 plt.title(str(dataset.ids[image_idx]))
                 plt.show()
-            elif not args.no_bar:
+            elif not args.no_bar and not train_mode:  # train_mode에서는 간소화
                 fps = 1 / frame_times.get_avg() if it > 1 and frame_times.get_avg() > 0 else 0
                 progress = (it + 1) / dataset_size * 100
                 progress_bar.set_val(it + 1)
                 print('\rProcessing Images  %s %6d / %6d (%5.2f%%)    %5.2f fps        '
                       % (repr(progress_bar), it + 1, dataset_size, progress, fps), end='')
+        
+        # ===== 수정 6: train_mode 완료 메시지 =====
+        if train_mode:
+            print(f"\n[Val] Processed {dataset_size} images", flush=True)
 
         # 4) 결과 수집/반환
         if not args.display and not args.benchmark:
-            print()
+            if not train_mode:
+                print()
             if args.output_coco_json:
-                print('Dumping detections...')
+                if not train_mode:
+                    print('Dumping detections...')
                 detections.dump()
 
-                # 원하면 사이즈 버킷 AP도 기록
-                if args.export_coco and args.coco_ann_file and args.metrics_csv:
-                    try:
-                        ap_all, ap_s, ap_m, ap_l = _eval_size_buckets(args.coco_ann_file, args.export_coco, iouType='segm')
-                        row = {
-                            'config': cfg.name,
-                            'pred_scales': str(getattr(cfg.backbone, 'pred_scales', 'NA')),
-                            'AP_all': round(ap_all * 100, 2),
-                            'AP_small': round(ap_s * 100, 2),
-                            'AP_medium': round(ap_m * 100, 2),
-                            'AP_large': round(ap_l * 100, 2),
-                        }
-                        os.makedirs(os.path.dirname(args.metrics_csv), exist_ok=True)
-                        write_header = not os.path.exists(args.metrics_csv) or os.path.getsize(args.metrics_csv) == 0
-                        with open(args.metrics_csv, 'a', newline='') as f:
-                            w = csv.DictWriter(f, fieldnames=list(row.keys()))
-                            if write_header:
-                                w.writeheader()
-                            w.writerow(row)
-                        print(f"[eval] Wrote metrics to {args.metrics_csv}: {row}")
-                    except Exception as e:
-                        print(f"[WARN] metrics_csv write failed: {e}")
-
-            # mAP 계산 및 반환 (JSON 덤프 여부와 무관하게)
+            # mAP 계산
             maps = calc_map(ap_data)
+
+            # ===== 수정 7: AJI는 명시적으로 계산되었을 때만 =====
+            if aji_acc is not None and not train_mode:
+                aji_val = aji_acc.value()
+                maps['AJI'] = round(aji_val, 4)
+                print(f"[AJI] dataset AJI = {aji_val:.4f}")
+
+            # ===== 수정 8: train_mode에서는 size_bucket 스킵 =====
+            if not train_mode and args.output_coco_json and args.export_coco and args.coco_ann_file and args.metrics_csv:
+                try:
+                    ap_all, ap_s, ap_m, ap_l = _eval_size_buckets(args.coco_ann_file, args.export_coco, iouType='segm')
+                    row = {
+                        'config': cfg.name,
+                        'pred_scales': str(getattr(cfg.backbone, 'pred_scales', 'NA')),
+                        'AP_all': round(ap_all * 100, 2),
+                        'AP_small': round(ap_s * 100, 2),
+                        'AP_medium': round(ap_m * 100, 2),
+                        'AP_large': round(ap_l * 100, 2),
+                        'AJI': (round(aji_acc.value()*100, 2) if aji_acc is not None else None),
+                    }
+                    os.makedirs(os.path.dirname(args.metrics_csv), exist_ok=True)
+                    write_header = not os.path.exists(args.metrics_csv) or os.path.getsize(args.metrics_csv) == 0
+                    with open(args.metrics_csv, 'a', newline='') as f:
+                        w = csv.DictWriter(f, fieldnames=list(row.keys()))
+                        if write_header:
+                            w.writeheader()
+                        w.writerow(row)
+                    print(f"[eval] Wrote metrics to {args.metrics_csv}")
+                except Exception as e:
+                    print(f"[WARN] metrics_csv write failed: {e}")
 
         elif args.benchmark:
             print('\n\nStats for the last frame:')
@@ -787,33 +1038,44 @@ def evaluate(net: Yolact, dataset, train_mode=False):
             maps = {}
 
         # 5) 프로파일 요약
-        if profiler and profiler.rows and dataset_size > 0:
-            summ = profiler.summary()
-            print("\n[PROFILE] images=%d | latency_avg=%.3f ms | p50=%.3f | p95=%s | thrpt=%.2f img/s | "
-                  "gpu_alloc_peak_avg=%.2f MB | gpu_reserved_peak_avg=%.2f MB" %
-                  (summ.get('count', 0),
-                   summ.get('latency_ms_avg', 0.0),
-                   summ.get('latency_ms_p50', 0.0),
-                   '%.3f' % summ['latency_ms_p95'] if summ.get('latency_ms_p95') is not None else 'n/a',
-                   summ.get('throughput_img_per_s', 0.0),
-                   summ.get('gpu_alloc_peak_mb_avg', 0.0),
-                   summ.get('gpu_reserved_peak_mb_avg', 0.0)),
-                  flush=True)
-            if args.profile_csv:
-                try:
-                    profiler.to_csv(args.profile_csv)
-                    print(f"[PROFILE] saved CSV → {args.profile_csv}")
-                except Exception as e:
-                    print(f"[PROFILE][WARN] failed to write CSV: {e}")
+        if isinstance(maps, dict):
+            if args.profile_infer and profiler and profiler.rows and dataset_size > 0 and not train_mode:
+                summ = profiler.summary()
+                print("\n[PROFILE] images=%d | latency_avg=%.3f ms | p50=%.3f | p95=%s | thrpt=%.2f img/s | "
+                      "gpu_alloc_peak_avg=%.2f MB | gpu_reserved_peak_avg=%.2f MB" %
+                      (summ.get('count', 0),
+                       summ.get('latency_ms_avg', 0.0),
+                       summ.get('latency_ms_p50', 0.0),
+                       '%.3f' % summ['latency_ms_p95'] if summ.get('latency_ms_p95') is not None else 'n/a',
+                       summ.get('throughput_img_per_s', 0.0),
+                       summ.get('gpu_alloc_peak_mb_avg', 0.0),
+                       summ.get('gpu_reserved_peak_mb_avg', 0.0)),
+                      flush=True)
+                if args.profile_csv:
+                    try:
+                        profiler.to_csv(args.profile_csv)
+                        print(f"[PROFILE] saved CSV → {args.profile_csv}")
+                    except Exception as e:
+                        print(f"[PROFILE][WARN] failed to write CSV: {e}")
+                maps['_profile'] = summ
 
     except KeyboardInterrupt:
-        print('Stopping...')
+        print('\n[Val] Validation interrupted by user')
+        if train_mode:
+            # train_mode에서는 상위로 전파하여 학습이 중단되도록
+            raise
+        # 그 외에는 부분 결과라도 반환
+
+    # ===== train_mode 종료 시 원래 설정 복원 =====
+    if train_mode:
+        args.profile_infer = original_profile
+        args.compute_aji = original_aji
 
     return maps
 
 
 def calc_map(ap_data):
-    print('Calculating mAP...')
+    print('Calculating mAP...', flush=True)
     aps = [{'box': [], 'mask': []} for _ in iou_thresholds]
     for _class in range(len(cfg.dataset.class_names)):
         for iou_idx in range(len(iou_thresholds)):
@@ -847,6 +1109,7 @@ def print_maps(all_maps):
     print()
 
 
+# ----------------- Main -----------------
 if __name__ == '__main__':
     parse_args()
 
@@ -902,12 +1165,32 @@ if __name__ == '__main__':
     net = net.to(device)
     print(' Done.')
 
+    # FLOPs 입력 해상도 결정
+    desired_hw = _parse_hw(args.flops_hw, default=None)
+    if desired_hw is None:
+        side = getattr(cfg, 'max_size', None)
+        desired_hw = (int(side), int(side)) if side is not None else (550, 550)
+
+    # FLOPs/Params를 평가 전에 먼저 찍기 (FPS는 없음)
+    if args.model_stats and args.flops_use_dummy:
+        print_model_stats(net, hw=desired_hw, device=device.type, stats_csv=args.stats_csv, fps_from_prof=None)
+
+    # 실행
     if args.images is not None:
+        # 폴더 시각화 모드
         inp, out = args.images.split(':')
         os.makedirs(out, exist_ok=True)
         for p in Path(inp).glob("*"):
             if p.is_dir():
                 continue
             evalimage(net, str(p), os.path.join(out, p.stem + ".png"))
+        results = {}
     else:
-        evaluate(net, dataset)
+        results = evaluate(net, dataset) if dataset is not None else {}
+
+    # 평가 끝난 후, 프로파일에서 Throughput을 가져와 Stats와 함께 출력/CSV 기록
+    if args.model_stats:
+        fps = None
+        if isinstance(results, dict) and '_profile' in results and 'throughput_img_per_s' in results['_profile']:
+            fps = results['_profile']['throughput_img_per_s']
+        print_model_stats(net, hw=desired_hw, device=device.type, stats_csv=args.stats_csv, fps_from_prof=fps)
