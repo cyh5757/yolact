@@ -38,7 +38,7 @@ from utils.wandb_logger import WandbLogger
 try:
     import yaml
 except Exception:
-    yaml = None
+        yaml = None
 
 # optional psutil for CPU mem
 try:
@@ -1154,13 +1154,6 @@ def train():
                 else:
                     nan_streak = 0
 
-                # Grad norm before clip
-                grad_norm_total = None
-                try:
-                    grad_norm_total = _global_grad_norm(yolact_net)
-                except Exception:
-                    pass
-
                 # Backward
                 loss.backward()
 
@@ -1182,6 +1175,13 @@ def train():
                     continue
                 else:
                     nan_streak = 0
+
+                # Grad norm (backward 후, clip 전 기준)
+                grad_norm_total = None
+                try:
+                    grad_norm_total = _global_grad_norm(yolact_net)
+                except Exception:
+                    pass
 
                 # (선택) clip
                 clip_max = 1.0
