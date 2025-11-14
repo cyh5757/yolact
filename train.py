@@ -96,10 +96,17 @@ parser.add_argument('--freeze_bn', default=None, type=str2bool,
                     help='Override cfg.freeze_bn (True/False).')
 
 # ---- Optim/Scheduler ----
-parser.add_argument('--optim', default=None, choices=['sgd', 'adamw'],
-                    help='Optimizer: sgd or adamw (default: from cfg)')
-parser.add_argument('--scheduler', default=None, choices=['step', 'cosine', 'none'],
-                    help='LR scheduler: step | cosine | none (default: from cfg)')
+parser.add_argument('--optim', default=None, choices=['sgd', 'adamw', 'adamwr'],
+                    help='Optimizer: sgd | adamw | adamwr (adamwr = AdamW + cosine_restart)')
+parser.add_argument('--scheduler', default=None,
+                    choices=['step', 'cosine', 'cosine_restart', 'none'],
+                    help='LR scheduler: step | cosine | cosine_restart | none (default: from cfg)')
+
+# CosineAnnealingWarmRestarts 파라미터
+parser.add_argument('--cosine_t0', type=int, default=None,
+                    help='CosineAnnealingWarmRestarts T_0 (post-warmup iterations).')
+parser.add_argument('--cosine_tmult', type=int, default=None,
+                    help='CosineAnnealingWarmRestarts T_mult.')
 
 # ---- 실험 디렉토리 ----
 parser.add_argument('--exp_dir', type=str, default=None,
@@ -689,7 +696,10 @@ def compute_validation_map(epoch, iteration, yolact_net, dataset, log:Log=None, 
         yolact_net.eval()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-            torch.cuda.reset_peak_memory_stats()
+            try:
+                torch.cuda.reset_peak_memory_stats()
+            except Exception:
+                pass
         start = time.time()
         print("\nComputing validation mAP (this may take a while)...", flush=True)
         val_info = eval_script.evaluate(yolact_net, dataset, train_mode=True)
@@ -978,23 +988,54 @@ def train():
     # Optimizer & Scheduler
     opt_name = (args.optim or 'adamw').lower()
     adamw_wd = getattr(cfg, 'adamw_weight_decay', None)
-    wd = (adamw_wd if opt_name == 'adamw' and adamw_wd is not None
+    wd = (adamw_wd if opt_name in ['adamw', 'adamwr'] and adamw_wd is not None
           else (args.decay if args.decay is not None else 0.0))
     param_groups = build_param_groups(yolact_net, wd=wd)
 
-    if opt_name == 'adamw':
+    if opt_name in ['adamw', 'adamwr']:
+        # AdamW / AdamWR 공통 (AdamWR은 스케줄을 cosine_restart로 쓰는 패턴)
         betas = getattr(cfg, 'adamw_betas', (0.9, 0.999))
         eps   = getattr(cfg, 'adamw_eps', 1e-8)
         optimizer = optim.AdamW(param_groups, lr=args.lr, betas=betas, eps=eps)
-    else:
+    elif opt_name == 'sgd':
         optimizer = optim.SGD(param_groups, lr=args.lr, momentum=args.momentum, weight_decay=0.0)
+    else:
+        raise ValueError(f"Unknown optimizer: {opt_name}")
 
+    # Scheduler 설정
     sched_name = (args.scheduler or 'cosine').lower()
-    use_cosine = (sched_name == 'cosine')
+    use_cosine         = (sched_name == 'cosine')
+    use_cosine_restart = (sched_name == 'cosine_restart')
+
     scheduler = None
     if use_cosine:
+        # 한 번만 쭉 cosine으로 감소 → eta_min까지 수렴
         tmax = max(1, cfg.max_iter - cfg.lr_warmup_until)
-        scheduler = CosineAnnealingLR(optimizer, T_max=tmax,eta_min=2e-5)
+        scheduler = CosineAnnealingLR(optimizer, T_max=tmax, eta_min=2e-5)
+
+    elif use_cosine_restart:
+        # Warm restarts: 여러 번 cosine 사이클 반복
+        total_after_warmup = max(1, cfg.max_iter - cfg.lr_warmup_until)
+
+        T_mult = int(args.cosine_tmult) if args.cosine_tmult is not None else 2
+
+        if args.cosine_t0 is not None:
+            T_0 = max(1, int(args.cosine_t0))
+        else:
+            # 전체 post-warmup 구간에서 대략 3~4 사이클 나오도록 자동 설정
+            num_cycles = 4
+            geom_sum = sum([T_mult**i for i in range(num_cycles)])
+            T_0 = max(1, int(total_after_warmup / geom_sum))
+
+        scheduler = CosineAnnealingWarmRestarts(
+            optimizer,
+            T_0=T_0,
+            T_mult=T_mult,
+            eta_min=2e-5,
+        )
+
+    # step 스케줄은 기존 cfg.lr_steps / gamma 로 처리
+    # (scheduler=None 이고 step 로직은 루프 안에서 동작)
 
     _dump_effective_run(
         _paths['exp_dir'], args, cfg,
@@ -1003,10 +1044,13 @@ def train():
             "optimizer": type(optimizer).__name__,
             "optimizer_params": {
                 "lr": args.lr,
-                "weight_decay_groups": [pg.get("weight_decay", None) for pg in optimizer.param_groups]
+                "weight_decay_groups": [pg.get("weight_decay", None) for pg in optimizer.param_groups],
+                "opt_name": opt_name,
             },
             "scheduler": (type(scheduler).__name__ if scheduler is not None else None),
-            "scheduler_T_max": (scheduler.T_max if isinstance(scheduler, CosineAnnealingLR) else None),
+            "scheduler_T_max": getattr(scheduler, "T_max", None),
+            "scheduler_T_0": getattr(scheduler, "T_0", None),
+            "scheduler_T_mult": getattr(scheduler, "T_mult", None),
             "resolved_backbone_path": _resolved_backbone_path,
             "early_stopping": {
                 "enabled": args.early_stop,
@@ -1081,8 +1125,8 @@ def train():
                     set_lr(optimizer, (args.lr - cfg.lr_warmup_init) *
                            (iteration / cfg.lr_warmup_until) + cfg.lr_warmup_init)
 
-                # step lr (cosine이 아닐 때만)
-                if not use_cosine:
+                # step lr (cosine 계열이 아닐 때만)
+                if not (use_cosine or use_cosine_restart):
                     while step_index < len(cfg.lr_steps) and iteration >= cfg.lr_steps[step_index]:
                         step_index += 1
                         set_lr(optimizer, args.lr * (args.gamma ** step_index))
@@ -1149,8 +1193,8 @@ def train():
                 optimizer.zero_grad(set_to_none=True)
                 step_time_backward = time.time() - step_t0
 
-                # cosine 스케줄 step (워밍업 이후)
-                if use_cosine and iteration > cfg.lr_warmup_until and scheduler is not None:
+                # cosine / cosine_restart 스케줄 step (워밍업 이후)
+                if (use_cosine or use_cosine_restart) and iteration > cfg.lr_warmup_until and scheduler is not None:
                     scheduler.step()
 
                 # 시간/평균

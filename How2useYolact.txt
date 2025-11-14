@@ -1,5 +1,5 @@
 
-#교체 최신
+#legacy - 11/13/1529
 python train.py \
   --config=cell_yolact_im700_config \
   --batch_size=2 \
@@ -20,18 +20,66 @@ python train.py \
   --patience=80 \
   --prefer_metric=mask_only
 
+#restart 주기를 더욱 빠르게 하고 싶을 때 → T_mult=1
+#초반 탐색은 빠르게, 후반 최적화는 느리고 안정적으로 하고 싶을 때 → T_mult=2
+#점점 더 길게 해서 후반에는 거의 decay처럼 만들고 싶을 때 → T_mult=3 이상
+# 최신 기본 AdamW + Cosine
+python train.py \
+  --config=cell_yolact_im700_config \
+  --batch_size=2 \
+  --num_workers=2 \
+  --cuda=True \
+  --optim=adamw \
+  --scheduler=cosine \
+  --lr=2e-4 \
+  --decay=0.01 \
+  --validation_epoch=1 \
+  --validation_size=10 \
+  --use_wandb=True \
+  --wandb_project=YOLACT-Cell \
+  --wandb_name=251113_adamw_cosine_lr2e4_wd1e2 \
+  --exp_dir=/home/mbd1234/yolact/experiments/251113_adamw_cosine_lr2e4_wd1e2 \
+  --no_autoscale \
+  --early_stop=True \
+  --patience=80 \
+  --prefer_metric=mask_only
+
+
+# AdamWR( AdamW + restart )
+python train.py \
+  --config=cell_yolact_im700_config \
+  --batch_size=2 \
+  --num_workers=2 \
+  --cuda=True \
+  --optim=adamwr \
+  --scheduler=cosine_restart \
+  --lr=2e-4 \
+  --decay=0.01 \
+  --cosine_tmult=2.0 \
+  --validation_epoch=1 \
+  --validation_size=10 \
+  --use_wandb=True \
+  --wandb_project=YOLACT-Cell \
+  --wandb_name=251113_adamwr_cosrestart_lr2e4_wd1e2 \
+  --exp_dir=/home/mbd1234/yolact/experiments/251113_adamwr_cosrestart_lr2e4_wd1e2 \
+  --no_autoscale \
+  --early_stop=True \
+  --patience=80 \
+  --prefer_metric=mask_only
+  # 필요하면 --cosine_t0=300 같이 추가해서 첫 사이클 길이 직접 지정
+
 
 
 
 최신 명령어
 #이미지만만 + 모델 통계/플롭스
 python eval.py \
-  --trained_model /home/mbd1234/yolact/experiments/251111_1710_anchor_matched_iter3000/weights/best_iter0000920_ep022_score22.4600.pth \
+  --trained_model /home/mbd1234/yolact/experiments/251113_0942_MaskSize128_iter3000/weights/best_iter0001640_ep040_score24.0900.pth \
   --config cell_yolact_im700_config \
   --cuda True \
-  --images /home/mbd1234/data/yolo_set_3/images/val:/home/mbd1234/data/Data_Analyze/preview/eval_testing_1111_1710/best \
+  --images /home/mbd1234/data/yolo_set_3/images/val:/home/mbd1234/data/Data_Analyze/preview/eval_testing_1113_0942/val_best \
   --score_threshold 0.05 \
-  --top_k 300 \
+  --top_k 1000 \
   --fast_nms True \
   --cross_class_nms False \
   --display_bboxes True \
@@ -41,7 +89,7 @@ python eval.py \
   --model_stats True \
   --flops_hw 700x700 \
   --flops_use_dummy True \
-  --stats_csv /home/mbd1234/data/Data_Analyze/preview/eval_testing_1111_1710_best/stats.csv \
+  --stats_csv /home/mbd1234/data/Data_Analyze/preview/eval_testing_1113_0942/best_stats.csv \
   --compute_aji False
 
 
