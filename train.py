@@ -38,7 +38,7 @@ from utils.wandb_logger import WandbLogger
 try:
     import yaml
 except Exception:
-        yaml = None
+    yaml = None
 
 # optional psutil for CPU mem
 try:
@@ -48,7 +48,8 @@ except Exception:
 
 
 def str2bool(v):
-    if isinstance(v, bool): return v
+    if isinstance(v, bool):
+        return v
     return v.lower() in ("yes", "true", "t", "1")
 
 
@@ -118,8 +119,12 @@ parser.add_argument('--save_best', default=True, type=str2bool,
 parser.add_argument('--best_alias', default='best.pth', type=str,
                     help='가장 최근 best 모델의 별칭 파일명')
 parser.add_argument('--prefer_metric', default='mask_only', type=str,
-                    choices=['mask_first','box_first','mask_only','box_only'],
+                    choices=['mask_first', 'box_first', 'mask_only', 'box_only'],
                     help='best 판단 시 어떤 지표를 우선할지')
+
+# NEW: best 갱신을 시작할 최소 학습 비율
+parser.add_argument('--best_mature_frac', default=0.5, type=float,
+                    help='0~1 사이 비율. 전체 max_iter 중 이 비율 이후부터만 best를 갱신')
 
 # ---- Last 저장 옵션 ----
 parser.add_argument('--save_last', default=True, type=str2bool,
@@ -174,15 +179,21 @@ if args.autoscale and args.batch_size != 8:
     cfg.max_iter = max(1, int(round(cfg.max_iter / factor)))
     cfg.lr_steps = [max(1, int(round(s / factor))) for s in cfg.lr_steps]
 
+
 def replace_from_cfg(name):
     if getattr(args, name) is None:
         setattr(args, name, getattr(cfg, name))
+
+
 for k in ['lr', 'decay', 'gamma', 'momentum']:
     replace_from_cfg(k)
+
 
 def replace_from_cfg2(name, default=None):
     if getattr(args, name) is None:
         setattr(args, name, getattr(cfg, name, default))
+
+
 replace_from_cfg2('optim', 'adamw')
 replace_from_cfg2('scheduler', 'cosine')
 
@@ -201,6 +212,7 @@ loss_types = ['B', 'C', 'M', 'P', 'D', 'E', 'S', 'I']
 # -------- Early Stopping Class --------
 class EarlyStopping:
     """Early Stopping 헬퍼 클래스"""
+
     def __init__(self, patience=10, min_delta=0.001, mode='max'):
         self.patience = patience
         self.min_delta = min_delta
@@ -208,7 +220,7 @@ class EarlyStopping:
         self.counter = 0
         self.best_score = float('-inf') if mode == 'max' else float('inf')
         self.early_stop = False
-        
+
     def __call__(self, score):
         if self.mode == 'max':
             improved = score > (self.best_score + self.min_delta)
@@ -229,11 +241,12 @@ class EarlyStopping:
 # -------- Best Checkpoint 관리 --------
 class BestCheckpointManager:
     """Best 체크포인트 파일 관리 (상위 N개만 유지)"""
+
     def __init__(self, root_dir, keep_n=3):
         self.root_dir = root_dir
         self.keep_n = keep_n
         self.checkpoints = []  # (score, filepath)
-        
+
     def add(self, score, filepath):
         self.checkpoints.append((score, filepath))
         self.checkpoints.sort(key=lambda x: x[0], reverse=True)
@@ -246,7 +259,7 @@ class BestCheckpointManager:
                     except Exception as e:
                         print(f"[BestMgr] Failed to remove {old_path}: {e}")
             self.checkpoints = self.checkpoints[:self.keep_n]
-    
+
     def get_best(self):
         return self.checkpoints[0] if self.checkpoints else (float('-inf'), None)
 
@@ -268,11 +281,13 @@ def _safe_val(v):
     except Exception:
         return str(v)
 
+
 def _cfg_to_dict(cfg_obj):
     d = {}
     for k, v in vars(cfg_obj).items():
         d[k] = _safe_val(v)
     return d
+
 
 def _run_quiet(cmd):
     try:
@@ -280,12 +295,14 @@ def _run_quiet(cmd):
     except Exception:
         return None
 
+
 def _get_git_info():
     return {
         "git_commit": _run_quiet(["git", "rev-parse", "HEAD"]),
         "git_branch": _run_quiet(["git", "rev-parse", "--abbrev-ref", "HEAD"]),
         "git_status_dirty": bool(_run_quiet(["git", "status", "--porcelain"]))
     }
+
 
 def _get_env_info():
     return {
@@ -296,6 +313,7 @@ def _get_env_info():
         "cuda_available": torch.cuda.is_available(),
         "gpu_name": (torch.cuda.get_device_name(0) if torch.cuda.is_available() else None)
     }
+
 
 def _dump_effective_run(exp_dir, args_obj, cfg_obj, extra=None, fname_prefix="effective"):
     os.makedirs(exp_dir, exist_ok=True)
@@ -327,9 +345,10 @@ def _dump_effective_run(exp_dir, args_obj, cfg_obj, extra=None, fname_prefix="ef
 # -------- experiment dirs, tee, initial dumps --------
 _paths = None
 
-def _dump_cfg_snapshot(dst_dir:str):
-    dump = {k: (v if isinstance(v, (int,float,str,bool,list,dict,type(None)))
-                else str(v)) for k,v in vars(cfg).items()}
+
+def _dump_cfg_snapshot(dst_dir: str):
+    dump = {k: (v if isinstance(v, (int, float, str, bool, list, dict, type(None)))
+                else str(v)) for k, v in vars(cfg).items()}
     ypath = os.path.join(dst_dir, 'config.yaml')
     jpath = os.path.join(dst_dir, 'config.json')
     try:
@@ -342,18 +361,22 @@ def _dump_cfg_snapshot(dst_dir:str):
     except Exception as e:
         print(f"[warn] config dump failed: {e}")
 
+
 class TeeStdout:
     def __init__(self, filepath):
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         self.file = open(filepath, 'a', buffering=1, encoding='utf-8')
         self.stdout = sys.stdout
         sys.stdout = self
+
     def write(self, data):
         self.stdout.write(data)
         self.file.write(data)
+
     def flush(self):
         self.stdout.flush()
         self.file.flush()
+
 
 def _prepare_experiment_dirs(args, cfg):
     if args.exp_dir is None:
@@ -388,7 +411,8 @@ def _prepare_experiment_dirs(args, cfg):
 
     return {'exp_dir': exp_dir, 'eval_dir': eval_dir, 'weights_dir': weights_dir, 'curves_dir': curves_dir}
 
-def _epoch_eval_paths(epoch_idx:int):
+
+def _epoch_eval_paths(epoch_idx: int):
     export_json = os.path.join(_paths['eval_dir'], f'val_epoch_{epoch_idx:03d}.json')
     metrics_csv = os.path.join(_paths['eval_dir'], 'metrics.csv')
     return export_json, metrics_csv
@@ -398,7 +422,8 @@ def _epoch_eval_paths(epoch_idx:int):
 def _ensure_dir(p):
     os.makedirs(p, exist_ok=True)
 
-def _append_row_csv(csv_path:str, row:dict):
+
+def _append_row_csv(csv_path: str, row: dict):
     _ensure_dir(os.path.dirname(csv_path))
     file_exists = os.path.exists(csv_path)
     with open(csv_path, "a", newline="", encoding="utf-8") as f:
@@ -407,11 +432,12 @@ def _append_row_csv(csv_path:str, row:dict):
             w.writeheader()
         w.writerow(row)
 
+
 def _mem_stats():
     out = {}
     if torch.cuda.is_available():
-        out["vram_alloc_GB"]    = float(torch.cuda.memory_allocated()  / 1e9)
-        out["vram_reserved_GB"] = float(torch.cuda.memory_reserved()   / 1e9)
+        out["vram_alloc_GB"] = float(torch.cuda.memory_allocated() / 1e9)
+        out["vram_reserved_GB"] = float(torch.cuda.memory_reserved() / 1e9)
         try:
             out["vram_peak_GB"] = float(torch.cuda.max_memory_allocated() / 1e9)
         except Exception:
@@ -421,24 +447,27 @@ def _mem_stats():
 
     if psutil is not None:
         vm = psutil.virtual_memory()
-        out["cpu_used_GB"] = float((vm.total - vm.available)/ (1024**3))
-        out["cpu_total_GB"] = float(vm.total / (1024**3))
+        out["cpu_used_GB"] = float((vm.total - vm.available) / (1024 ** 3))
+        out["cpu_total_GB"] = float(vm.total / (1024 ** 3))
     else:
         out["cpu_used_GB"] = out["cpu_total_GB"] = None
     return out
+
 
 def _global_grad_norm(model: nn.Module):
     total = 0.0
     for p in model.parameters():
         if p.grad is not None:
             g = p.grad.detach().float()
-            total += float(torch.sum(g*g).item())
+            total += float(torch.sum(g * g).item())
     return math.sqrt(total) if total > 0 else 0.0
+
 
 def _lr_wd_groups(optimizer: optim.Optimizer):
     lrs = [pg.get("lr", None) for pg in optimizer.param_groups]
     wds = [pg.get("weight_decay", None) for pg in optimizer.param_groups]
     return lrs, wds
+
 
 def iter_with_timer(loader):
     t_fetch = time.time()
@@ -447,7 +476,8 @@ def iter_with_timer(loader):
         yield batch, data_time
         t_fetch = time.time()
 
-def _append_ckpt_registry(root_dir:str, tag:str, epoch:int, iteration:int, val_score, path:str, extra:dict=None):
+
+def _append_ckpt_registry(root_dir: str, tag: str, epoch: int, iteration: int, val_score, path: str, extra: dict = None):
     row = {
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "tag": tag,
@@ -470,6 +500,7 @@ def all_finite_dict(d: dict) -> bool:
                 return False
     return True
 
+
 def log_nonfinite_losses(losses: dict, tag: str = ""):
     bad = []
     for k, v in losses.items():
@@ -479,7 +510,7 @@ def log_nonfinite_losses(losses: dict, tag: str = ""):
             except Exception:
                 bad.append(k)
     if bad:
-        print(f"[NaN guard]{(' '+tag) if tag else ''} non-finite: " + ", ".join(bad))
+        print(f"[NaN guard]{(' ' + tag) if tag else ''} non-finite: " + ", ".join(bad))
 
 
 # -------- Minimal ScatterWrapper for validation loss (compat) --------
@@ -488,6 +519,7 @@ class ScatterWrapper(object):
         self.targets = targets
         self.masks = masks
         self.num_crowds = num_crowds
+
     def make_mask(self):
         return [t is not None for t in self.targets]
 
@@ -495,7 +527,8 @@ class ScatterWrapper(object):
 # -------- Model+Loss wrappers --------
 class NetLoss(nn.Module):
     """net + criterion 묶음. AMP는 비활성."""
-    def __init__(self, net:Yolact, criterion:MultiBoxLoss, device:torch.device):
+
+    def __init__(self, net: Yolact, criterion: MultiBoxLoss, device: torch.device):
         super().__init__()
         self.net = net
         self.criterion = criterion
@@ -508,12 +541,14 @@ class NetLoss(nn.Module):
             losses = self.criterion(self.net, preds, targets, masks, num_crowds)
         return losses
 
+
 class CustomDataParallel(nn.DataParallel):
     """YOLACT 전용 DataParallel: scatter/gather 커스텀"""
+
     def scatter(self, inputs, kwargs, device_ids):
         devices = ['cuda:' + str(x) for x in device_ids]
         splits = prepare_data(inputs[0], devices, allocation=args.batch_alloc)
-        return [[split[device_idx] for split in splits] for device_idx in range(len(devices))], [kwargs]*len(devices)
+        return [[split[device_idx] for split in splits] for device_idx in range(len(devices))], [kwargs] * len(devices)
 
     def gather(self, outputs, output_device):
         out = {}
@@ -521,8 +556,10 @@ class CustomDataParallel(nn.DataParallel):
             out[k] = torch.stack([output[k].to(output_device) for output in outputs])
         return out
 
+
 class SingleDeviceWrapper(nn.Module):
     """단일 장치 datum=(images,(targets,masks,num_crowds)) 처리"""
+
     def __init__(self, netloss_module: NetLoss, device: torch.device):
         super().__init__()
         self.netloss = netloss_module
@@ -531,17 +568,18 @@ class SingleDeviceWrapper(nn.Module):
     def forward(self, datum):
         images, (targets, masks, num_crowds) = datum
         if isinstance(images, (list, tuple)):
-            images = torch.stack([img.to(self.device, non_blocking=(self.device.type=='cuda')) for img in images], dim=0)
+            images = torch.stack([img.to(self.device, non_blocking=(self.device.type == 'cuda')) for img in images],
+                                 dim=0)
         else:
-            images = images.to(self.device, non_blocking=(self.device.type=='cuda'))
+            images = images.to(self.device, non_blocking=(self.device.type == 'cuda'))
 
         def move_to_device(x):
             if isinstance(x, (list, tuple)):
                 return [t.to(self.device) if hasattr(t, 'to') else t for t in x]
             return x.to(self.device) if hasattr(x, 'to') else x
 
-        targets    = move_to_device(targets)
-        masks      = move_to_device(masks)
+        targets = move_to_device(targets)
+        masks = move_to_device(masks)
         num_crowds = move_to_device(num_crowds)
         return self.netloss(images, targets, masks, num_crowds)
 
@@ -553,11 +591,13 @@ def set_lr(optimizer, new_lr):
     global cur_lr
     cur_lr = new_lr
 
+
 def gradinator(x):
     x.requires_grad = False
     return x
 
-def prepare_data(datum, devices:list=None, allocation:list=None):
+
+def prepare_data(datum, devices: list = None, allocation: list = None):
     with torch.no_grad():
         if devices is None:
             devices = ['cuda:0'] if use_cuda else ['cpu']
@@ -572,11 +612,11 @@ def prepare_data(datum, devices:list=None, allocation:list=None):
             for _ in range(alloc):
                 images[cur_idx] = gradinator(images[cur_idx].to(device_name))
                 targets[cur_idx] = gradinator(targets[cur_idx].to(device_name))
-                masks[cur_idx]   = gradinator(masks[cur_idx].to(device_name))
+                masks[cur_idx] = gradinator(masks[cur_idx].to(device_name))
                 cur_idx += 1
 
         if cfg.preserve_aspect_ratio:
-            _, h, w = images[random.randint(0, len(images)-1)].size()
+            _, h, w = images[random.randint(0, len(images) - 1)].size()
             for idx, (image, target, mask, num_crowd) in enumerate(zip(images, targets, masks, num_crowds)):
                 images[idx], targets[idx], masks[idx], num_crowds[idx] = enforce_size(
                     image, target, mask, num_crowd, w, h
@@ -585,10 +625,10 @@ def prepare_data(datum, devices:list=None, allocation:list=None):
         cur_idx = 0
         split_images, split_targets, split_masks, split_numcrowds = [[None for _ in allocation] for _ in range(4)]
         for device_idx, alloc in enumerate(allocation):
-            split_images[device_idx]   = torch.stack(images[cur_idx:cur_idx+alloc], dim=0)
-            split_targets[device_idx]  = targets[cur_idx:cur_idx+alloc]
-            split_masks[device_idx]    = masks[cur_idx:cur_idx+alloc]
-            split_numcrowds[device_idx]= num_crowds[cur_idx:cur_idx+alloc]
+            split_images[device_idx] = torch.stack(images[cur_idx:cur_idx + alloc], dim=0)
+            split_targets[device_idx] = targets[cur_idx:cur_idx + alloc]
+            split_masks[device_idx] = masks[cur_idx:cur_idx + alloc]
+            split_numcrowds[device_idx] = num_crowds[cur_idx:cur_idx + alloc]
             cur_idx += alloc
 
         return split_images, split_targets, split_masks, split_numcrowds
@@ -605,16 +645,20 @@ def _dig_first_float(x):
         for k in ['mAP', 'map', 'AP', 'ap', 'all', 'overall', 'mean', 'avg']:
             if k in x:
                 v = _dig_first_float(x[k])
-                if v is not None: return v
+                if v is not None:
+                    return v
         for v in x.values():
             r = _dig_first_float(v)
-            if r is not None: return r
+            if r is not None:
+                return r
         return None
     if isinstance(x, (list, tuple)):
         for v in x:
             r = _dig_first_float(v)
-            if r is not None: return r
+            if r is not None:
+                return r
     return None
+
 
 def _safe_get(d, *keys, default=None):
     cur = d
@@ -624,6 +668,7 @@ def _safe_get(d, *keys, default=None):
         else:
             return default
     return cur
+
 
 def pick_val_score(val_info: dict, prefer: str = 'mask_only') -> float:
     """여러 반환 스키마를 견고하게 지원하는 mAP 선택기"""
@@ -666,12 +711,12 @@ def compute_validation_loss(net, data_loader, criterion):
                 break
         for k in losses:
             losses[k] /= max(1, iterations)
-        loss_labels = sum([[k, losses[k]] for k in ['B','C','M','S','P','D','E','I'] if k in losses], [])
+        loss_labels = sum([[k, losses[k]] for k in ['B', 'C', 'M', 'S', 'P', 'D', 'E', 'I'] if k in losses], [])
         print(('Validation Loss ||' + (' %s: %.3f |' * len(losses)) + ')') % tuple(loss_labels), flush=True)
         return losses
 
 
-def compute_validation_map(epoch, iteration, yolact_net, dataset, log:Log=None, wandb_logger:WandbLogger=None):
+def compute_validation_map(epoch, iteration, yolact_net, dataset, log: Log = None, wandb_logger: WandbLogger = None):
     export_json, metrics_csv = _epoch_eval_paths(epoch)
     eval_args = [
         '--no_bar',
@@ -685,9 +730,9 @@ def compute_validation_map(epoch, iteration, yolact_net, dataset, log:Log=None, 
         f'--coco_images_dir={cfg.dataset.valid_images}',
         f'--coco_ann_file={cfg.dataset.valid_info}',
         f'--metrics_csv={metrics_csv}',
-        '--compute_aji=False',  # Disable expensive AJI computation during training
-        '--profile_infer=False',  # Disable profiler during training validation
-        '--model_stats=False',  # Disable model stats during training validation
+        '--compute_aji=False',      # Disable expensive AJI computation during training
+        '--profile_infer=False',    # Disable profiler during training validation
+        '--model_stats=False',      # Disable model stats during training validation
     ]
     eval_script.parse_args(eval_args)
     eval_script.prep_coco_cats()
@@ -715,14 +760,16 @@ def compute_validation_map(epoch, iteration, yolact_net, dataset, log:Log=None, 
             # 납작한 스칼라로도 몇 개 추가 로깅
             try:
                 flat = {}
+
                 def _flatten(prefix, obj):
                     if isinstance(obj, dict):
-                        for k,v in obj.items():
+                        for k, v in obj.items():
                             _flatten(f"{prefix}{k}/", v)
-                    elif isinstance(obj, (int,float)) and math.isfinite(float(obj)):
+                    elif isinstance(obj, (int, float)) and math.isfinite(float(obj)):
                         flat[prefix[:-1]] = float(obj)
+
                 _flatten("", val_info)
-                keep_keys = [k for k in flat.keys() if any(s in k.lower() for s in ["ap50","ap75","map","aps","apm","apl"])]
+                keep_keys = [k for k in flat.keys() if any(s in k.lower() for s in ["ap50", "ap75", "map", "aps", "apm", "apl"])]
                 wandb_logger.log_scalar_dict(step=iteration, d={f"val_flat/{k}": flat[k] for k in keep_keys})
             except Exception:
                 pass
@@ -745,7 +792,8 @@ def setup_eval():
 def build_param_groups(model, wd: float):
     decay, no_decay = [], []
     for n, p in model.named_parameters():
-        if not p.requires_grad: continue
+        if not p.requires_grad:
+            continue
         if p.ndimension() == 1 or n.endswith('.bias') or 'bn' in n.lower() or 'gn' in n.lower():
             no_decay.append(p)
         else:
@@ -870,7 +918,7 @@ def train():
 
     # save/log 폴더를 실험 트리로 고정
     args.save_folder = _paths['weights_dir']
-    args.log_folder  = _paths['exp_dir']
+    args.log_folder = _paths['exp_dir']
     os.makedirs(args.save_folder, exist_ok=True)
 
     dataset = COCODetection(
@@ -895,7 +943,7 @@ def train():
     # 로깅
     log = None
     if args.log:
-        log = Log(cfg.name, args.log_folder, dict(args._get_kwargs() ),
+        log = Log(cfg.name, args.log_folder, dict(args._get_kwargs()),
                   overwrite=(args.resume is None), log_gpu_stats=args.log_gpu)
 
     wandb_logger = None
@@ -918,7 +966,8 @@ def train():
             min_delta=args.min_delta,
             mode='max'  # mAP는 클수록 좋음
         )
-        print(f"[EarlyStopping] Enabled with patience={args.patience}, min_delta={args.min_delta}, prefer={args.prefer_metric}")
+        print(
+            f"[EarlyStopping] Enabled with patience={args.patience}, min_delta={args.min_delta}, prefer={args.prefer_metric}")
 
     # Best Checkpoint Manager
     best_ckpt_mgr = BestCheckpointManager(
@@ -995,7 +1044,7 @@ def train():
     if opt_name in ['adamw', 'adamwr']:
         # AdamW / AdamWR 공통 (AdamWR은 스케줄을 cosine_restart로 쓰는 패턴)
         betas = getattr(cfg, 'adamw_betas', (0.9, 0.999))
-        eps   = getattr(cfg, 'adamw_eps', 1e-8)
+        eps = getattr(cfg, 'adamw_eps', 1e-8)
         optimizer = optim.AdamW(param_groups, lr=args.lr, betas=betas, eps=eps)
     elif opt_name == 'sgd':
         optimizer = optim.SGD(param_groups, lr=args.lr, momentum=args.momentum, weight_decay=0.0)
@@ -1004,7 +1053,7 @@ def train():
 
     # Scheduler 설정
     sched_name = (args.scheduler or 'cosine').lower()
-    use_cosine         = (sched_name == 'cosine')
+    use_cosine = (sched_name == 'cosine')
     use_cosine_restart = (sched_name == 'cosine_restart')
 
     scheduler = None
@@ -1024,7 +1073,7 @@ def train():
         else:
             # 전체 post-warmup 구간에서 대략 3~4 사이클 나오도록 자동 설정
             num_cycles = 4
-            geom_sum = sum([T_mult**i for i in range(num_cycles)])
+            geom_sum = sum([T_mult ** i for i in range(num_cycles)])
             T_0 = max(1, int(total_after_warmup / geom_sum))
 
         scheduler = CosineAnnealingWarmRestarts(
@@ -1068,6 +1117,11 @@ def train():
     num_epochs = math.ceil(cfg.max_iter / epoch_size)
     step_index = 0
 
+    # NEW: best를 갱신하기 시작할 iteration (초반 노이즈 구간 무시)
+    best_mature_frac_clamped = max(0.0, min(1.0, float(args.best_mature_frac)))
+    mature_iter = int(cfg.max_iter * best_mature_frac_clamped)
+    print(f"[BEST] mature_iter = {mature_iter} (frac={best_mature_frac_clamped})")
+
     data_loader = data.DataLoader(
         dataset, args.batch_size,
         num_workers=args.num_workers,
@@ -1095,13 +1149,17 @@ def train():
 
             # reset CUDA peak mem per epoch (optional)
             if torch.cuda.is_available():
-                try: torch.cuda.reset_peak_memory_stats()
-                except Exception: pass
+                try:
+                    torch.cuda.reset_peak_memory_stats()
+                except Exception:
+                    pass
 
             # === measure data_time via wrapper ===
             for datum, data_time in iter_with_timer(data_loader):
-                if iteration == (epoch + 1) * epoch_size: break
-                if iteration == cfg.max_iter: break
+                if iteration == (epoch + 1) * epoch_size:
+                    break
+                if iteration == cfg.max_iter:
+                    break
 
                 # delayed settings
                 changed = False
@@ -1146,7 +1204,8 @@ def train():
                     optimizer.zero_grad(set_to_none=True)
                     nan_streak += 1
                     if nan_streak >= args.max_nan_streak:
-                        print(f"\n[EARLY STOP] Consecutive NaN losses ({nan_streak}) exceeded max_nan_streak={args.max_nan_streak}")
+                        print(
+                            f"\n[EARLY STOP] Consecutive NaN losses ({nan_streak}) exceeded max_nan_streak={args.max_nan_streak}")
                         training_stop_reason = 'nan'
                         raise KeyboardInterrupt
                     iteration += 1
@@ -1162,13 +1221,16 @@ def train():
                 for p in yolact_net.parameters():
                     if p.grad is not None:
                         if torch.isnan(p.grad).any() or torch.isinf(p.grad).any():
-                            bad_grad = True; break
+                            bad_grad = True
+                            break
                 if bad_grad:
-                    print(f"[NaN guard] NaN/Inf in gradients (iter {iteration}) — skipping optimizer.step()")
+                    print(
+                        f"[NaN guard] NaN/Inf in gradients (iter {iteration}) — skipping optimizer.step()")
                     optimizer.zero_grad(set_to_none=True)
                     nan_streak += 1
                     if nan_streak >= args.max_nan_streak:
-                        print(f"\n[EARLY STOP] Consecutive NaN gradients ({nan_streak}) exceeded max_nan_streak={args.max_nan_streak}")
+                        print(
+                            f"\n[EARLY STOP] Consecutive NaN gradients ({nan_streak}) exceeded max_nan_streak={args.max_nan_streak}")
                         training_stop_reason = 'nan'
                         raise KeyboardInterrupt
                     iteration += 1
@@ -1218,12 +1280,12 @@ def train():
                 scalars = {
                     "epoch": epoch,
                     "iter": iteration,
-                    "lr_group0": lrs[0] if len(lrs)>0 else None,
-                    "lr_group1": lrs[1] if len(lrs)>1 else None,
-                    "wd_group0": wds[0] if len(wds)>0 else None,
-                    "wd_group1": wds[1] if len(wds)>1 else None,
+                    "lr_group0": lrs[0] if len(lrs) > 0 else None,
+                    "lr_group1": lrs[1] if len(lrs) > 1 else None,
+                    "wd_group0": wds[0] if len(wds) > 0 else None,
+                    "wd_group1": wds[1] if len(wds) > 1 else None,
                     "loss_total": float(loss.item()) if torch.is_tensor(loss) else float(loss),
-                    **{f"loss_{k}": float(v.item()) for k,v in losses.items() if torch.is_tensor(v)},
+                    **{f"loss_{k}": float(v.item()) for k, v in losses.items() if torch.is_tensor(v)},
                     "data_time_s": float(data_time),
                     "fwd_time_s": float(step_time_forward),
                     "bwd_step_time_s": float(step_time_backward),
@@ -1308,8 +1370,10 @@ def train():
                     if args.keep_latest and latest is not None:
                         if args.keep_latest_interval <= 0 or iteration % args.keep_latest_interval != args.save_interval:
                             print('Deleting old save...')
-                            try: os.remove(latest)
-                            except Exception: pass
+                            try:
+                                os.remove(latest)
+                            except Exception:
+                                pass
 
             # epoch마다 validation
             if args.validation_epoch > 0:
@@ -1319,9 +1383,9 @@ def train():
                     # 현재 점수 계산
                     val_score = pick_val_score(val_info, args.prefer_metric)
 
-                    # Best 체크포인트 저장
+                    # Best 체크포인트 저장 (mature_iter 이후부터)
                     if args.save_best and isinstance(val_info, dict):
-                        if val_score > best_score:
+                        if iteration >= mature_iter and val_score > best_score:
                             best_score = val_score
                             ckpt_path, alias = save_as_best(
                                 yolact_net, score=best_score, epoch=epoch,
@@ -1335,6 +1399,10 @@ def train():
                                     'best/iter': int(iteration),
                                     'best/epoch': int(epoch),
                                 })
+                        else:
+                            if iteration < mature_iter:
+                                print(f"[BEST] iter {iteration} < mature_iter {mature_iter}, "
+                                      f"val_score={val_score:.4f}는 early 구간이라 best 갱신 안 함.")
 
                     # Early Stopping 체크 + 매회 로그
                     if early_stopper is not None and isinstance(val_info, dict):
@@ -1361,7 +1429,7 @@ def train():
                                               log if args.log else None, wandb_logger=wandb_logger)
             val_score = pick_val_score(val_info, args.prefer_metric)
             if args.save_best and isinstance(val_info, dict):
-                if val_score > best_score:
+                if iteration >= mature_iter and val_score > best_score:
                     best_score = val_score
                     ckpt_path, alias = save_as_best(
                         yolact_net, score=best_score, epoch=epoch,
@@ -1375,6 +1443,10 @@ def train():
                             'best/iter': int(iteration),
                             'best/epoch': int(epoch),
                         })
+                else:
+                    if iteration < mature_iter:
+                        print(f"[BEST] final val at iter {iteration} < mature_iter {mature_iter}, "
+                              f"val_score={val_score:.4f}는 best 갱신 안 함.")
         else:
             # 검증 비활성 시 라스트 저장용 점수 없음
             val_score = None
@@ -1396,6 +1468,28 @@ def train():
                 val_info = compute_validation_map(epoch, iteration, yolact_net, val_dataset,
                                                   log if args.log else None, wandb_logger=wandb_logger)
                 last_val_score = pick_val_score(val_info, args.prefer_metric)
+
+                # interrupt 시에도 mature_iter 이후라면 best 갱신
+                if args.save_best and isinstance(val_info, dict):
+                    if iteration >= mature_iter and last_val_score > best_score:
+                        best_score = last_val_score
+                        ckpt_path, alias = save_as_best(
+                            yolact_net, score=best_score, epoch=epoch,
+                            iteration=iteration, root_dir=args.save_folder,
+                            alias_name=args.best_alias
+                        )
+                        best_ckpt_mgr.add(best_score, ckpt_path)
+                        if wandb_logger is not None:
+                            wandb_logger.log_scalar_dict(step=iteration, d={
+                                'best/score': float(best_score),
+                                'best/iter': int(iteration),
+                                'best/epoch': int(epoch),
+                            })
+                    else:
+                        if iteration < mature_iter:
+                            print(f"[BEST] interrupt-final val at iter {iteration} < mature_iter {mature_iter}, "
+                                  f"val_score={last_val_score:.4f}는 best 갱신 안 함.")
+
             except Exception as e:
                 print(f"[LAST][warn] final validation failed: {e}")
 
@@ -1415,7 +1509,7 @@ def train():
             print(f"\n=== Early Stopping Summary ===")
             print(f"Best validation score: {early_stopper.best_score:.4f}")
             print(f"Patience counter: {early_stopper.counter}/{early_stopper.patience}")
-        
+
         if wandb_logger is not None:
             wandb_logger.finish()
         sys.exit(0)
@@ -1423,7 +1517,7 @@ def train():
     print("\n=== Training Complete ===")
     if best_score > float('-inf'):
         print(f"Best validation score: {best_score:.4f}")
-    
+
     if wandb_logger is not None:
         wandb_logger.finish()
 

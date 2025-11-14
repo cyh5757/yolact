@@ -74,10 +74,10 @@ python train.py \
 최신 명령어
 #이미지만만 + 모델 통계/플롭스
 python eval.py \
-  --trained_model /home/mbd1234/yolact/experiments/251113_0942_MaskSize128_iter3000/weights/best_iter0001640_ep040_score24.0900.pth \
+  --trained_model /home/mbd1234/yolact/experiments/251114_0935_adamwr_cosrestart_lr2e5_wd1e2/weights/best_iter0000840_ep020_score26.4500.pth \
   --config cell_yolact_im700_config \
   --cuda True \
-  --images /home/mbd1234/data/yolo_set_3/images/val:/home/mbd1234/data/Data_Analyze/preview/eval_testing_1113_0942/val_best \
+  --images /home/mbd1234/data/yolo_set_3/images/val:/home/mbd1234/data/Data_Analyze/preview/eval_testing_1114_0935/val_best \
   --score_threshold 0.05 \
   --top_k 1000 \
   --fast_nms True \
@@ -89,7 +89,7 @@ python eval.py \
   --model_stats True \
   --flops_hw 700x700 \
   --flops_use_dummy True \
-  --stats_csv /home/mbd1234/data/Data_Analyze/preview/eval_testing_1113_0942/best_stats.csv \
+  --stats_csv /home/mbd1234/data/Data_Analyze/preview/eval_testing_1114_0935/best_stats.csv \
   --compute_aji False
 
 
