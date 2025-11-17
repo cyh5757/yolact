@@ -408,10 +408,10 @@ coco_base_config = Config({
     'lr_steps': (280000, 360000, 400000),
 
     # Initial learning rate to linearly warmup from (if until > 0)
-    'lr_warmup_init': 1e-4,
+    'lr_warmup_init': 2e-5,
 
     # If > 0 then increase the lr linearly from warmup_init to lr each iter for until iters
-    'lr_warmup_until': 500,
+    'lr_warmup_until': 1000,
 
     # The terms to scale the respective loss by
     'conf_alpha': 1,
