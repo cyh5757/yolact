@@ -5,6 +5,7 @@ import numpy as np
 import types
 from numpy import random
 from math import sqrt
+import albumentations as A
 
 from data import cfg, MEANS, STD
 
@@ -505,6 +506,137 @@ class RandomRot90(object):
         return image, masks, boxes, labels
 
 
+class AlbumentationsImageAugment(object):
+    """
+    이미지 전체에 대한 Albumentations 기반 Augmentation 래퍼.
+    - FLIP
+    - ROTATE
+    - CROP
+    - COLOR JITTER
+    - NOISE
+    를 image / masks / boxes에 동시에 적용.
+    """
+
+    def __init__(self, p=1.0):
+        # --- 1번 실험용: 이미지 전체 Augment만 구성 ---
+        self.transform = A.Compose(
+            [
+                # 좌우 flip
+                A.HorizontalFlip(p=0.5),
+
+                # 상하 flip (원하면 꺼도 됨)
+                A.VerticalFlip(p=0.5),
+
+                # 약간의 회전 + 약간의 이동/스케일
+                A.ShiftScaleRotate(
+                    shift_limit=0.05,
+                    scale_limit=0.10,
+                    rotate_limit=15,
+                    border_mode=cv2.BORDER_REFLECT_101,
+                    p=0.7,
+                ),
+
+                # 랜덤 크롭 (원본의 80% 정도 영역)
+                A.RandomResizedCrop(
+                    height=cfg.max_size,   # 어차피 뒤에서 Resize 한 번 더 하니 여기선 대충 맞춰주기만
+                    width=cfg.max_size,
+                    scale=(0.8, 1.0),
+                    ratio=(0.75, 1.3333333),
+                    p=0.5,
+                ),
+
+                # 색상 Jitter (밝기/대비/채도/색조)
+                A.RandomBrightnessContrast(
+                    brightness_limit=0.2,
+                    contrast_limit=0.2,
+                    p=0.7,
+                ),
+                A.HueSaturationValue(
+                    hue_shift_limit=10,
+                    sat_shift_limit=20,
+                    val_shift_limit=10,
+                    p=0.7,
+                ),
+
+                # Noise
+                A.OneOf(
+                    [
+                        A.GaussNoise(var_limit=(10.0, 50.0), p=1.0),
+                        A.ISONoise(color_shift=(0.01, 0.05), intensity=(0.1, 0.5), p=1.0),
+                    ],
+                    p=0.5,
+                ),
+            ],
+            # bbox / mask 세팅
+            bbox_params=A.BboxParams(
+                format="pascal_voc",        # [x_min, y_min, x_max, y_max] (픽셀 단위)
+                min_visibility=0.0,
+                label_fields=["bbox_labels"],
+            ),
+            # mask는 HxW 바이너리 배열 리스트
+            mask_params=A.MaskParams(),
+            p=p,
+        )
+
+    def __call__(self, image, masks, boxes, labels):
+        """
+        image : H x W x 3, float32 (0~255) (ConvertFromInts 이후)
+        masks : (N, H, W)
+        boxes : (N, 4)  절대좌표 [x1,y1,x2,y2]
+        labels: dict {'labels': np.array, 'num_crowds': int} 형태라고 가정
+        """
+
+        # gt가 하나도 없는 경우 그대로 반환
+        if boxes is None or len(boxes) == 0:
+            return image, masks, boxes, labels
+
+        # Albumentations는 mask 리스트, bbox 리스트를 받음
+        # masks: (N, H, W) -> [H, W] 리스트
+        if masks is not None:
+            mask_list = [masks[i] for i in range(masks.shape[0])]
+        else:
+            mask_list = None
+
+        # boxes: (N,4), labels['labels']: (N,)
+        if isinstance(labels, dict) and "labels" in labels:
+            bbox_labels = labels["labels"]
+        else:
+            # 혹시 dict가 아니거나 labels가 없으면 모두 1로 채움 (임시)
+            bbox_labels = np.ones((boxes.shape[0],), dtype=np.int32)
+
+        bboxes = boxes.astype(np.float32).tolist()  # [[x1,y1,x2,y2], ...]
+
+        # Albumentations 적용
+        transformed = self.transform(
+            image=image,
+            masks=mask_list,
+            bboxes=bboxes,
+            bbox_labels=bbox_labels,
+        )
+
+        out_img = transformed["image"]
+
+        # 마스크 되돌리기
+        if mask_list is not None and len(transformed["masks"]) > 0:
+            out_masks = np.stack(transformed["masks"], axis=0).astype(masks.dtype)
+        else:
+            out_masks = masks
+
+        # 박스와 라벨 되돌리기
+        out_bboxes = np.array(transformed["bboxes"], dtype=boxes.dtype)
+        out_labels_arr = np.array(transformed["bbox_labels"], dtype=bbox_labels.dtype)
+
+        # labels dict 업데이트
+        if isinstance(labels, dict):
+            labels_out = labels.copy()
+            labels_out["labels"] = out_labels_arr
+            labels_out["num_crowds"] = int((labels_out["labels"] < 0).sum())
+        else:
+            labels_out = labels
+
+        return out_img, out_masks, out_bboxes, labels_out
+
+
 class SwapChannels(object):
     """Transforms a tensorized image by swapping the channels in the order
      specified in the swap tuple.
@@ -716,6 +848,42 @@ class SSDAugmentation(object):
             ToPercentCoords(),
             PrepareMasks(cfg.mask_size, cfg.use_gt_bboxes),
             BackboneTransform(cfg.backbone.transform, mean, std, 'BGR')
+        ])
+
+    def __call__(self, img, masks, boxes, labels):
+        return self.augment(img, masks, boxes, labels)
+
+
+
+class SSD_ALBU_Augmentation(object):
+    """ Transform to be used when training. """
+
+    def __init__(self, mean=MEANS, std=STD, albumentations_mode="image"):
+        """
+        albumentations_mode:
+          - "image" : 이미지 전체에 대한 Albumentations (1번 실험)
+          - "none"  : Albumentations 사용 안 함 (원본 baseline)
+          (나중에 "instance" 모드 등으로 2,3번 실험 확장 가능)
+        """
+
+        if albumentations_mode == "image":
+            alb_aug = AlbumentationsImageAugment(p=1.0)
+        else:
+            # Augmentation 끄기 (baseline 비교 용도)
+            alb_aug = Lambda(lambda img, masks, boxes, labels: (img, masks, boxes, labels))
+
+        self.augment = Compose([
+            ConvertFromInts(),          # uint8 -> float32
+            ToAbsoluteCoords(),         # box 비율 -> 절대좌표 (Albumentations가 쓰기 좋게)
+
+            # --- 여기서 Albumentations 기반 이미지 전체 Augmentation ---
+            alb_aug,
+
+            # 이후는 기존 파이프라인 그대로 유지
+            Resize(),                  # 최종 입력 사이즈로 리사이즈 + 작은 박스 필터
+            ToPercentCoords(),         # 다시 비율좌표로 변환
+            PrepareMasks(cfg.mask_size, cfg.use_gt_bboxes),
+            BackboneTransform(cfg.backbone.transform, mean, std, 'BGR'),
         ])
 
     def __call__(self, img, masks, boxes, labels):

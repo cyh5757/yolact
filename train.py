@@ -7,7 +7,7 @@
 
 from torch.cpu import is_available
 from data import *
-from utils.augmentations import SSDAugmentation, BaseTransform
+from utils.augmentations import SSDAugmentation, BaseTransform, SSD_ALBU_Augmentation
 from utils.functions import MovingAverage, SavePath
 from utils.logger import Log
 from utils import timer
@@ -876,7 +876,7 @@ def train():
     dataset = COCODetection(
         image_path=cfg.dataset.train_images,
         info_file=cfg.dataset.train_info,
-        transform=SSDAugmentation(MEANS)
+        transform=SSD_ALBU_Augmentation(MEANS)
     )
     val_dataset = None
     if args.validation_epoch > 0:
