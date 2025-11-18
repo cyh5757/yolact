@@ -92,7 +92,7 @@ parser.add_argument('--batch_alloc', default=None, type=str)
 parser.add_argument('--no_autoscale', dest='autoscale', action='store_false')
 
 # 추가: BN freeze CLI 오버라이드
-parser.add_argument('--freeze_bn', default=None, type=str2bool,
+parser.add_argument('--freeze_bn', default=False, type=str2bool,
                     help='Override cfg.freeze_bn (True/False).')
 
 # ---- Optim/Scheduler ----

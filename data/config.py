@@ -480,7 +480,7 @@ coco_base_config = Config({
 
     # If using batchnorm anywhere in the backbone, freeze the batchnorm layer during training.
     # Note: any additional batch norm layers after the backbone will not be frozen.
-    'freeze_bn': True,
+    'freeze_bn': False,
 
     # Set this to a config object if you want an FPN (inherit from fpn_base). See fpn_base for details.
     'fpn': None,
@@ -756,7 +756,7 @@ cell_yolact_im700_config = yolact_im700_config.copy({
     }),
 
     # --------- 학습 길이/디버그 ---------
-    'max_iter': 3000,
+    'max_iter': 9000,
     'mask_proto_debug': False,
 
     # --------- 너무 작은 GT/Pred 필터 완화 ---------

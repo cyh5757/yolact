@@ -507,27 +507,27 @@ class RandomRot90(object):
 
 
 class AlbumentationsImageAugment(object):
-    """
-    이미지 전체에 대한 Albumentations 기반 Augmentation 래퍼.
-    - FLIP
-    - ROTATE
-    - CROP
-    - COLOR JITTER
-    - NOISE
-    를 image / masks / boxes에 동시에 적용.
-    """
-
     def __init__(self, p=1.0):
-        # --- 1번 실험용: 이미지 전체 Augment만 구성 ---
+        """
+        이미지 전체에 대한 Albumentations 기반 Augmentation 래퍼.
+        - Flip (좌우/상하)
+        - ShiftScaleRotate
+        - RandomResizedCrop
+        - Color jitter 계열
+        - Noise 계열
+        를 image / masks / boxes / labels 에 동시에 적용.
+
+        boxes: 절대좌표 [x1, y1, x2, y2] (ToAbsoluteCoords 뒤에서 들어옴)
+        masks: (N, H, W) 바이너리 마스크
+        labels: dict { 'labels': np.array, 'num_crowds': int } 형태 가정
+        """
         self.transform = A.Compose(
             [
-                # 좌우 flip
+                # 좌우 / 상하 flip
                 A.HorizontalFlip(p=0.5),
-
-                # 상하 flip (원하면 꺼도 됨)
                 A.VerticalFlip(p=0.5),
 
-                # 약간의 회전 + 약간의 이동/스케일
+                # 약간의 회전 + 스케일 + 시프트
                 A.ShiftScaleRotate(
                     shift_limit=0.05,
                     scale_limit=0.10,
@@ -536,21 +536,22 @@ class AlbumentationsImageAugment(object):
                     p=0.7,
                 ),
 
-                # 랜덤 크롭 (원본의 80% 정도 영역)
+                # 랜덤 리사이즈 크롭 (전체의 80~100%)
                 A.RandomResizedCrop(
-                    height=cfg.max_size,   # 어차피 뒤에서 Resize 한 번 더 하니 여기선 대충 맞춰주기만
-                    width=cfg.max_size,
+                    size=(cfg.max_size, cfg.max_size),  # (height, width)
                     scale=(0.8, 1.0),
                     ratio=(0.75, 1.3333333),
                     p=0.5,
                 ),
 
-                # 색상 Jitter (밝기/대비/채도/색조)
+                # 밝기 / 대비
                 A.RandomBrightnessContrast(
                     brightness_limit=0.2,
                     contrast_limit=0.2,
                     p=0.7,
                 ),
+
+                # Hue / Saturation / Value 변화
                 A.HueSaturationValue(
                     hue_shift_limit=10,
                     sat_shift_limit=20,
@@ -558,53 +559,56 @@ class AlbumentationsImageAugment(object):
                     p=0.7,
                 ),
 
-                # Noise
+                # Noise (Gaussian or ISO)
                 A.OneOf(
                     [
-                        A.GaussNoise(var_limit=(10.0, 50.0), p=1.0),
-                        A.ISONoise(color_shift=(0.01, 0.05), intensity=(0.1, 0.5), p=1.0),
+                        A.GaussNoise(p=1.0),
+                        A.ISONoise(
+                            color_shift=(0.01, 0.05),
+                            intensity=(0.1, 0.5),
+                            p=1.0,
+                        ),
                     ],
                     p=0.5,
                 ),
             ],
-            # bbox / mask 세팅
             bbox_params=A.BboxParams(
-                format="pascal_voc",        # [x_min, y_min, x_max, y_max] (픽셀 단위)
-                min_visibility=0.0,
+                format="pascal_voc",   # [x_min, y_min, x_max, y_max] (픽셀 단위)
+                min_visibility=0.0,    # 필터링은 직접 area 기준으로 할 거라 0.0
                 label_fields=["bbox_labels"],
             ),
-            # mask는 HxW 바이너리 배열 리스트
-            mask_params=A.MaskParams(),
             p=p,
         )
 
     def __call__(self, image, masks, boxes, labels):
         """
-        image : H x W x 3, float32 (0~255) (ConvertFromInts 이후)
+        image : (H, W, 3) float32, BGR, 0~255 (ConvertFromInts 이후)
         masks : (N, H, W)
-        boxes : (N, 4)  절대좌표 [x1,y1,x2,y2]
-        labels: dict {'labels': np.array, 'num_crowds': int} 형태라고 가정
+        boxes : (N, 4) 절대좌표 [x1, y1, x2, y2]
+        labels: dict {'labels': np.array, 'num_crowds': int}
         """
 
-        # gt가 하나도 없는 경우 그대로 반환
+        # gt가 아예 없으면 그냥 통과
         if boxes is None or len(boxes) == 0:
             return image, masks, boxes, labels
 
-        # Albumentations는 mask 리스트, bbox 리스트를 받음
-        # masks: (N, H, W) -> [H, W] 리스트
+        # ---- 원본 백업 (문제 생기면 fallback 용) ----
+        orig_image, orig_masks, orig_boxes, orig_labels = image, masks, boxes, labels
+
+        # (N, H, W) -> [H, W] 리스트 (Albumentations가 원하는 형태)
         if masks is not None:
             mask_list = [masks[i] for i in range(masks.shape[0])]
         else:
             mask_list = None
 
-        # boxes: (N,4), labels['labels']: (N,)
+        # bbox 레이블
         if isinstance(labels, dict) and "labels" in labels:
             bbox_labels = labels["labels"]
         else:
-            # 혹시 dict가 아니거나 labels가 없으면 모두 1로 채움 (임시)
+            # 혹시 dict가 아니거나 labels 없으면 임시 1로 채움
             bbox_labels = np.ones((boxes.shape[0],), dtype=np.int32)
 
-        bboxes = boxes.astype(np.float32).tolist()  # [[x1,y1,x2,y2], ...]
+        bboxes = boxes.astype(np.float32).tolist()
 
         # Albumentations 적용
         transformed = self.transform(
@@ -615,26 +619,72 @@ class AlbumentationsImageAugment(object):
         )
 
         out_img = transformed["image"]
+        new_bboxes = np.array(transformed["bboxes"], dtype=boxes.dtype)
+        new_labels = np.array(transformed["bbox_labels"], dtype=bbox_labels.dtype)
+        new_masks_list = transformed["masks"] if mask_list is not None else None
 
-        # 마스크 되돌리기
-        if mask_list is not None and len(transformed["masks"]) > 0:
-            out_masks = np.stack(transformed["masks"], axis=0).astype(masks.dtype)
+        # ─────────────────────────────────────────────
+        # (0) 우선 길이부터 강제 맞추기 (masks / bboxes / labels 동기화)
+        # ─────────────────────────────────────────────
+        if new_masks_list is not None:
+            n_masks = len(new_masks_list)
+            n_boxes = new_bboxes.shape[0]
+            n_labels = new_labels.shape[0]
+
+            min_n = min(n_masks, n_boxes, n_labels)
+
+            # Albumentations 결과로 gt가 전부 날아간 경우 → 안전하게 원본으로 복귀
+            if min_n == 0:
+                return orig_image, orig_masks, orig_boxes, orig_labels
+
+            if n_masks != min_n or n_boxes != min_n or n_labels != min_n:
+                # 필요시 디버깅용 로그:
+                # print(f"[ALBU] len mismatch before fix: masks={n_masks}, boxes={n_boxes}, labels={n_labels} -> min_n={min_n}")
+                new_masks_list = new_masks_list[:min_n]
+                new_bboxes     = new_bboxes[:min_n]
+                new_labels     = new_labels[:min_n]
+
+        # ─────────────────────────────────────────────
+        # (1) 마스크 스택 후 area 기반 필터
+        #     완전히 사라진 인스턴스(면적 0)는 제거
+        # ─────────────────────────────────────────────
+        if new_masks_list is not None and len(new_masks_list) > 0:
+            masks_arr = np.stack(new_masks_list, axis=0).astype(np.float32)
+
+            # 각 인스턴스별 마스크 area 계산
+            areas = masks_arr.reshape(masks_arr.shape[0], -1).sum(axis=1)
+            keep = areas > 0.5  # 조금이라도 픽셀이 남아있으면 keep
+
+            # 전부 사라졌으면, 이 샘플은 Albumentations 없이 원본 사용
+            if keep.sum() == 0:
+                return orig_image, orig_masks, orig_boxes, orig_labels
+
+            # 여기서는 len(keep) == len(new_bboxes) == len(new_labels) == len(masks_arr)가 보장됨
+            masks_arr = masks_arr[keep]
+            new_bboxes = new_bboxes[keep]
+            new_labels = new_labels[keep]
+
+            # 마스크를 0/1 바이너리로 정리
+            masks_arr[masks_arr > 0.5] = 1.0
+            masks_arr[masks_arr <= 0.5] = 0.0
+
+            out_masks = masks_arr.astype(masks.dtype)
         else:
+            # mask_list가 없거나 변환 결과가 없다면 원본 마스크 사용
             out_masks = masks
+            # new_bboxes, new_labels 는 그대로 사용
 
-        # 박스와 라벨 되돌리기
-        out_bboxes = np.array(transformed["bboxes"], dtype=boxes.dtype)
-        out_labels_arr = np.array(transformed["bbox_labels"], dtype=bbox_labels.dtype)
-
-        # labels dict 업데이트
+        # ─────────────────────────────────────────────
+        # (2) labels dict 업데이트
+        # ─────────────────────────────────────────────
         if isinstance(labels, dict):
             labels_out = labels.copy()
-            labels_out["labels"] = out_labels_arr
+            labels_out["labels"] = new_labels
             labels_out["num_crowds"] = int((labels_out["labels"] < 0).sum())
         else:
             labels_out = labels
 
-        return out_img, out_masks, out_bboxes, labels_out
+        return out_img, out_masks, new_bboxes, labels_out
 
 
 class SwapChannels(object):
@@ -887,4 +937,11 @@ class SSD_ALBU_Augmentation(object):
         ])
 
     def __call__(self, img, masks, boxes, labels):
+            # 디버그용 (한 번만 찍고 끄거나, 특정 iter 에서만 찍어도 됨)
+        if masks is not None:
+            if not np.isfinite(masks).all():
+                print("[DEBUG] masks contain NaN/Inf")
+            print("[DEBUG] mask range:", float(masks.min()), float(masks.max()), masks.dtype, masks.shape)
+            # 강제 클램핑도 한번 테스트
+            masks = np.clip(masks, 0.0, 1.0)
         return self.augment(img, masks, boxes, labels)
