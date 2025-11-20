@@ -876,7 +876,7 @@ def train():
     dataset = COCODetection(
         image_path=cfg.dataset.train_images,
         info_file=cfg.dataset.train_info,
-        transform=SSD_ALBU_Augmentation(MEANS)
+        transform=SSD_ALBU_Augmentation(mean=MEANS, std=STD, policy="medium")
     )
     val_dataset = None
     if args.validation_epoch > 0:

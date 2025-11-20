@@ -73,7 +73,6 @@ class ConvertFromInts(object):
         return image.astype(np.float32), masks, boxes, labels
 
 
-
 class ToAbsoluteCoords(object):
     def __call__(self, image, masks=None, boxes=None, labels=None):
         height, width, channels = image.shape
@@ -122,10 +121,11 @@ class Pad(object):
             expand_masks = np.zeros(
                 (masks.shape[0], self.height, self.width),
                 dtype=masks.dtype)
-            expand_masks[:,:im_h,:im_w] = masks
+            expand_masks[:, :im_h, :im_w] = masks
             masks = expand_masks
 
         return expand_image, masks, boxes, labels
+
 
 class Resize(object):
     """If preserve_aspect_ratio is true, this resizes to an approximate area of max_size * max_size"""
@@ -145,7 +145,7 @@ class Resize(object):
 
     def __call__(self, image, masks, boxes, labels=None):
         img_h, img_w, _ = image.shape
-        
+
         if self.preserve_aspect_ratio:
             width, height = Resize.calc_size_preserve_ar(img_w, img_h, self.max_size)
         else:
@@ -187,26 +187,23 @@ class Resize(object):
             masks = masks.transpose((2, 0, 1))
 
             # ----- 박스 스케일 조정 (절대좌표인 상태) -----
-            boxes[:, [0, 2]] *= (width  / img_w)
+            boxes[:, [0, 2]] *= (width / img_w)
             boxes[:, [1, 3]] *= (height / img_h)
 
         # ----- 너무 작은 박스 제거 -----
         w = boxes[:, 2] - boxes[:, 0]
         h = boxes[:, 3] - boxes[:, 1]
         scale = cfg.max_size / 1024.0  # 원래 1024 기준이었다면
-        min_w = cfg.discard_box_width  * scale
+        min_w = cfg.discard_box_width * scale
         min_h = cfg.discard_box_height * scale
         keep = (w > min_w) & (h > min_h)
-        # print(f"[Resize] before={len(w)} kept={int(keep.sum())} "
-        #     f"thr=({cfg.discard_box_width},{cfg.discard_box_height}) "
-        #     f"minwh=({w.min() if len(w)>0 else -1:.3f},{h.min() if len(h)>0 else -1:.3f})")
         masks = masks[keep]
         boxes = boxes[keep]
 
         if isinstance(labels, dict) and 'labels' in labels:
             labels['labels'] = labels['labels'][keep]
             labels['num_crowds'] = int((labels['labels'] < 0).sum())
-        # print(f"[DEBUG] Resize -> img_hw={img_h}x{img_w}, new size: {width}x{height}, preserve_ar={cfg.preserve_aspect_ratio}, max_size={cfg.max_size}")
+
         return image, masks, boxes, labels
 
 
@@ -244,12 +241,7 @@ class RandomLightingNoise(object):
                       (2, 0, 1), (2, 1, 0))
 
     def __call__(self, image, masks=None, boxes=None, labels=None):
-        # Don't shuffle the channels please, why would you do this
-
-        # if random.randint(2):
-        #     swap = self.perms[random.randint(len(self.perms))]
-        #     shuffle = SwapChannels(swap)  # shuffle channels
-        #     image = shuffle(image)
+        # 채널 셔플은 사용 안 함
         return image, masks, boxes, labels
 
 
@@ -307,35 +299,22 @@ class ToTensor(object):
 
 
 class RandomSampleCrop(object):
-    """Crop
-    Arguments:
-        img (Image): the image being input during training
-        boxes (Tensor): the original bounding boxes in pt form
-        labels (Tensor): the class labels for each bbox
-        mode (float tuple): the min and max jaccard overlaps
-    Return:
-        (img, boxes, classes)
-            img (Image): the cropped image
-            boxes (Tensor): the adjusted bounding boxes in pt form
-            labels (Tensor): the class labels for each bbox
+    """
+    SSD-style random sample crop
     """
     def __init__(self):
         self.sample_options = (
-            # using entire original input image
             None,
-            # sample a patch s.t. MIN jaccard w/ obj in .1,.3,.4,.7,.9
             (0.1, None),
             (0.3, None),
             (0.7, None),
             (0.9, None),
-            # randomly sample a patch
             (None, None),
         )
 
     def __call__(self, image, masks, boxes=None, labels=None):
         height, width, _ = image.shape
         while True:
-            # randomly choose a mode
             idx = np.random.randint(0, len(self.sample_options))
             mode = self.sample_options[idx]
             if mode is None:
@@ -347,90 +326,57 @@ class RandomSampleCrop(object):
             if max_iou is None:
                 max_iou = float('inf')
 
-            # max trails (50)
             for _ in range(50):
                 current_image = image
 
                 w = random.uniform(0.3 * width, width)
                 h = random.uniform(0.3 * height, height)
 
-                # aspect ratio constraint b/t .5 & 2
                 if h / w < 0.5 or h / w > 2:
                     continue
 
                 left = random.uniform(width - w)
                 top = random.uniform(height - h)
 
-                # convert to integer rect x1,y1,x2,y2
-                rect = np.array([int(left), int(top), int(left+w), int(top+h)])
+                rect = np.array([int(left), int(top), int(left + w), int(top + h)])
 
-                # calculate IoU (jaccard overlap) b/t the cropped and gt boxes
                 overlap = jaccard_numpy(boxes, rect)
 
-                # This piece of code is bugged and does nothing:
-                # https://github.com/amdegroot/ssd.pytorch/issues/68
-                #
-                # However, when I fixed it with overlap.max() < min_iou,
-                # it cut the mAP in half (after 8k iterations). So it stays.
-                #
-                # is min and max overlap constraint satisfied? if not try again
                 if overlap.min() < min_iou and max_iou < overlap.max():
                     continue
 
-                # cut the crop from the image
-                current_image = current_image[rect[1]:rect[3], rect[0]:rect[2],
-                                              :]
+                current_image = current_image[rect[1]:rect[3], rect[0]:rect[2], :]
 
-                # keep overlap with gt box IF center in sampled patch
                 centers = (boxes[:, :2] + boxes[:, 2:]) / 2.0
 
-                # mask in all gt boxes that above and to the left of centers
                 m1 = (rect[0] < centers[:, 0]) * (rect[1] < centers[:, 1])
-
-                # mask in all gt boxes that under and to the right of centers
                 m2 = (rect[2] > centers[:, 0]) * (rect[3] > centers[:, 1])
-
-                # mask in that both m1 and m2 are true
                 mask = m1 * m2
 
-                # [0 ... 0 for num_gt and then 1 ... 1 for num_crowds]
                 num_crowds = labels['num_crowds']
                 crowd_mask = np.zeros(mask.shape, dtype=np.int32)
 
                 if num_crowds > 0:
                     crowd_mask[-num_crowds:] = 1
 
-                # have any valid boxes? try again if not
-                # Also make sure you have at least one regular gt
-                if not mask.any() or np.sum(1-crowd_mask[mask]) == 0:
+                if not mask.any() or np.sum(1 - crowd_mask[mask]) == 0:
                     continue
 
-                # take only the matching gt masks
                 current_masks = masks[mask, :, :].copy()
-
-                # take only matching gt boxes
                 current_boxes = boxes[mask, :].copy()
 
-                # take only matching gt labels
                 labels['labels'] = labels['labels'][mask]
                 current_labels = labels
 
-                # We now might have fewer crowd annotations
                 if num_crowds > 0:
                     labels['num_crowds'] = np.sum(crowd_mask[mask])
 
-                # should we use the box left and top corner or the crop's
-                current_boxes[:, :2] = np.maximum(current_boxes[:, :2],
-                                                  rect[:2])
-                # adjust to crop (by substracting crop's left,top)
+                current_boxes[:, :2] = np.maximum(current_boxes[:, :2], rect[:2])
                 current_boxes[:, :2] -= rect[:2]
 
-                current_boxes[:, 2:] = np.minimum(current_boxes[:, 2:],
-                                                  rect[2:])
-                # adjust to crop (by substracting crop's left,top)
+                current_boxes[:, 2:] = np.minimum(current_boxes[:, 2:], rect[2:])
                 current_boxes[:, 2:] -= rect[:2]
 
-                # crop the current masks to the same dimensions as the image
                 current_masks = current_masks[:, rect[1]:rect[3], rect[0]:rect[2]]
 
                 return current_image, current_masks, current_boxes, current_labels
@@ -446,11 +392,11 @@ class Expand(object):
 
         height, width, depth = image.shape
         ratio = random.uniform(1, 4)
-        left = random.uniform(0, width*ratio - width)
-        top = random.uniform(0, height*ratio - height)
+        left = random.uniform(0, width * ratio - width)
+        top = random.uniform(0, height * ratio - height)
 
         expand_image = np.zeros(
-            (int(height*ratio), int(width*ratio), depth),
+            (int(height * ratio), int(width * ratio), depth),
             dtype=image.dtype)
         expand_image[:, :, :] = self.mean
         expand_image[int(top):int(top + height),
@@ -458,10 +404,10 @@ class Expand(object):
         image = expand_image
 
         expand_masks = np.zeros(
-            (masks.shape[0], int(height*ratio), int(width*ratio)),
+            (masks.shape[0], int(height * ratio), int(width * ratio)),
             dtype=masks.dtype)
-        expand_masks[:,int(top):int(top + height),
-                       int(left):int(left + width)] = masks
+        expand_masks[:, int(top):int(top + height),
+                     int(left):int(left + width)] = masks
         masks = expand_masks
 
         boxes = boxes.copy()
@@ -484,7 +430,7 @@ class RandomMirror(object):
 
 class RandomFlip(object):
     def __call__(self, image, masks, boxes, labels):
-        height , _ , _ = image.shape
+        height, _, _ = image.shape
         if random.randint(2):
             image = image[::-1, :]
             masks = masks[:, ::-1, :]
@@ -495,196 +441,16 @@ class RandomFlip(object):
 
 class RandomRot90(object):
     def __call__(self, image, masks, boxes, labels):
-        old_height , old_width , _ = image.shape
+        old_height, old_width, _ = image.shape
         k = random.randint(4)
-        image = np.rot90(image,k)
-        masks = np.array([np.rot90(mask,k) for mask in masks])
+        image = np.rot90(image, k)
+        masks = np.array([np.rot90(mask, k) for mask in masks])
         boxes = boxes.copy()
         for _ in range(k):
             boxes = np.array([[box[1], old_width - 1 - box[2], box[3], old_width - 1 - box[0]] for box in boxes])
             old_width, old_height = old_height, old_width
         return image, masks, boxes, labels
 
-
-class AlbumentationsImageAugment(object):
-    def __init__(self, p=1.0):
-        """
-        이미지 전체에 대한 Albumentations 기반 Augmentation 래퍼.
-        - Flip (좌우/상하)
-        - ShiftScaleRotate
-        - RandomResizedCrop
-        - Color jitter 계열
-        - Noise 계열
-        를 image / masks / boxes / labels 에 동시에 적용.
-
-        boxes: 절대좌표 [x1, y1, x2, y2] (ToAbsoluteCoords 뒤에서 들어옴)
-        masks: (N, H, W) 바이너리 마스크
-        labels: dict { 'labels': np.array, 'num_crowds': int } 형태 가정
-        """
-        self.transform = A.Compose(
-            [
-                # 좌우 / 상하 flip
-                A.HorizontalFlip(p=0.5),
-                A.VerticalFlip(p=0.5),
-
-                # 약간의 회전 + 스케일 + 시프트
-                A.ShiftScaleRotate(
-                    shift_limit=0.05,
-                    scale_limit=0.10,
-                    rotate_limit=15,
-                    border_mode=cv2.BORDER_REFLECT_101,
-                    p=0.7,
-                ),
-
-                # 랜덤 리사이즈 크롭 (전체의 80~100%)
-                A.RandomResizedCrop(
-                    size=(cfg.max_size, cfg.max_size),  # (height, width)
-                    scale=(0.8, 1.0),
-                    ratio=(0.75, 1.3333333),
-                    p=0.5,
-                ),
-
-                # 밝기 / 대비
-                A.RandomBrightnessContrast(
-                    brightness_limit=0.2,
-                    contrast_limit=0.2,
-                    p=0.7,
-                ),
-
-                # Hue / Saturation / Value 변화
-                A.HueSaturationValue(
-                    hue_shift_limit=10,
-                    sat_shift_limit=20,
-                    val_shift_limit=10,
-                    p=0.7,
-                ),
-
-                # Noise (Gaussian or ISO)
-                A.OneOf(
-                    [
-                        A.GaussNoise(p=1.0),
-                        A.ISONoise(
-                            color_shift=(0.01, 0.05),
-                            intensity=(0.1, 0.5),
-                            p=1.0,
-                        ),
-                    ],
-                    p=0.5,
-                ),
-            ],
-            bbox_params=A.BboxParams(
-                format="pascal_voc",   # [x_min, y_min, x_max, y_max] (픽셀 단위)
-                min_visibility=0.0,    # 필터링은 직접 area 기준으로 할 거라 0.0
-                label_fields=["bbox_labels"],
-            ),
-            p=p,
-        )
-
-    def __call__(self, image, masks, boxes, labels):
-        """
-        image : (H, W, 3) float32, BGR, 0~255 (ConvertFromInts 이후)
-        masks : (N, H, W)
-        boxes : (N, 4) 절대좌표 [x1, y1, x2, y2]
-        labels: dict {'labels': np.array, 'num_crowds': int}
-        """
-
-        # gt가 아예 없으면 그냥 통과
-        if boxes is None or len(boxes) == 0:
-            return image, masks, boxes, labels
-
-        # ---- 원본 백업 (문제 생기면 fallback 용) ----
-        orig_image, orig_masks, orig_boxes, orig_labels = image, masks, boxes, labels
-
-        # (N, H, W) -> [H, W] 리스트 (Albumentations가 원하는 형태)
-        if masks is not None:
-            mask_list = [masks[i] for i in range(masks.shape[0])]
-        else:
-            mask_list = None
-
-        # bbox 레이블
-        if isinstance(labels, dict) and "labels" in labels:
-            bbox_labels = labels["labels"]
-        else:
-            # 혹시 dict가 아니거나 labels 없으면 임시 1로 채움
-            bbox_labels = np.ones((boxes.shape[0],), dtype=np.int32)
-
-        bboxes = boxes.astype(np.float32).tolist()
-
-        # Albumentations 적용
-        transformed = self.transform(
-            image=image,
-            masks=mask_list,
-            bboxes=bboxes,
-            bbox_labels=bbox_labels,
-        )
-
-        out_img = transformed["image"]
-        new_bboxes = np.array(transformed["bboxes"], dtype=boxes.dtype)
-        new_labels = np.array(transformed["bbox_labels"], dtype=bbox_labels.dtype)
-        new_masks_list = transformed["masks"] if mask_list is not None else None
-
-        # ─────────────────────────────────────────────
-        # (0) 우선 길이부터 강제 맞추기 (masks / bboxes / labels 동기화)
-        # ─────────────────────────────────────────────
-        if new_masks_list is not None:
-            n_masks = len(new_masks_list)
-            n_boxes = new_bboxes.shape[0]
-            n_labels = new_labels.shape[0]
-
-            min_n = min(n_masks, n_boxes, n_labels)
-
-            # Albumentations 결과로 gt가 전부 날아간 경우 → 안전하게 원본으로 복귀
-            if min_n == 0:
-                return orig_image, orig_masks, orig_boxes, orig_labels
-
-            if n_masks != min_n or n_boxes != min_n or n_labels != min_n:
-                # 필요시 디버깅용 로그:
-                # print(f"[ALBU] len mismatch before fix: masks={n_masks}, boxes={n_boxes}, labels={n_labels} -> min_n={min_n}")
-                new_masks_list = new_masks_list[:min_n]
-                new_bboxes     = new_bboxes[:min_n]
-                new_labels     = new_labels[:min_n]
-
-        # ─────────────────────────────────────────────
-        # (1) 마스크 스택 후 area 기반 필터
-        #     완전히 사라진 인스턴스(면적 0)는 제거
-        # ─────────────────────────────────────────────
-        if new_masks_list is not None and len(new_masks_list) > 0:
-            masks_arr = np.stack(new_masks_list, axis=0).astype(np.float32)
-
-            # 각 인스턴스별 마스크 area 계산
-            areas = masks_arr.reshape(masks_arr.shape[0], -1).sum(axis=1)
-            keep = areas > 0.5  # 조금이라도 픽셀이 남아있으면 keep
-
-            # 전부 사라졌으면, 이 샘플은 Albumentations 없이 원본 사용
-            if keep.sum() == 0:
-                return orig_image, orig_masks, orig_boxes, orig_labels
-
-            # 여기서는 len(keep) == len(new_bboxes) == len(new_labels) == len(masks_arr)가 보장됨
-            masks_arr = masks_arr[keep]
-            new_bboxes = new_bboxes[keep]
-            new_labels = new_labels[keep]
-
-            # 마스크를 0/1 바이너리로 정리
-            masks_arr[masks_arr > 0.5] = 1.0
-            masks_arr[masks_arr <= 0.5] = 0.0
-
-            out_masks = masks_arr.astype(masks.dtype)
-        else:
-            # mask_list가 없거나 변환 결과가 없다면 원본 마스크 사용
-            out_masks = masks
-            # new_bboxes, new_labels 는 그대로 사용
-
-        # ─────────────────────────────────────────────
-        # (2) labels dict 업데이트
-        # ─────────────────────────────────────────────
-        if isinstance(labels, dict):
-            labels_out = labels.copy()
-            labels_out["labels"] = new_labels
-            labels_out["num_crowds"] = int((labels_out["labels"] < 0).sum())
-        else:
-            labels_out = labels
-
-        return out_img, out_masks, new_bboxes, labels_out
 
 
 class SwapChannels(object):
@@ -699,16 +465,6 @@ class SwapChannels(object):
         self.swaps = swaps
 
     def __call__(self, image):
-        """
-        Args:
-            image (Tensor): image tensor to be transformed
-        Return:
-            a tensor with channels swapped according to swap
-        """
-        # if torch.is_tensor(image):
-        #     image = image.data.cpu().numpy()
-        # else:
-        #     image = np.array(image)
         image = image[:, :, self.swaps]
         return image
 
@@ -736,11 +492,11 @@ class PhotometricDistort(object):
         im, masks, boxes, labels = distort(im, masks, boxes, labels)
         return self.rand_light_noise(im, masks, boxes, labels)
 
+
 class PrepareMasks(object):
     """
     Prepares the gt masks for use_gt_bboxes by cropping with the gt box
-    and downsampling the resulting mask to mask_size, mask_size. This
-    function doesn't do anything if cfg.use_gt_bboxes is False.
+    and downsampling the resulting mask to mask_size, mask_size.
     """
 
     def __init__(self, mask_size, use_gt_bboxes):
@@ -750,7 +506,7 @@ class PrepareMasks(object):
     def __call__(self, image, masks, boxes, labels=None):
         if not self.use_gt_bboxes:
             return image, masks, boxes, labels
-        
+
         height, width, _ = image.shape
 
         new_masks = np.zeros((masks.shape[0], self.mask_size ** 2))
@@ -763,37 +519,31 @@ class PrepareMasks(object):
             y2 *= height
             x1, y1, x2, y2 = (int(x1), int(y1), int(x2), int(y2))
 
-            # +1 So that if y1=10.6 and y2=10.9 we still have a bounding box
-            cropped_mask = masks[i, y1:(y2+1), x1:(x2+1)]
+            cropped_mask = masks[i, y1:(y2 + 1), x1:(x2 + 1)]
             scaled_mask = cv2.resize(cropped_mask, (self.mask_size, self.mask_size))
 
             new_masks[i, :] = scaled_mask.reshape(1, -1)
-        
-        # Binarize
-        new_masks[new_masks >  0.5] = 1
+
+        new_masks[new_masks > 0.5] = 1
         new_masks[new_masks <= 0.5] = 0
 
         return image, new_masks, boxes, labels
 
+
 class BackboneTransform(object):
     """
-    Transforms a BRG image made of floats in the range [0, 255] to whatever
+    Transforms a BGR image made of floats in the range [0, 255] to whatever
     input the current backbone network needs.
-
-    transform is a transform config object (see config.py).
-    in_channel_order is probably 'BGR' but you do you, kid.
     """
     def __init__(self, transform, mean, std, in_channel_order):
         self.mean = np.array(mean, dtype=np.float32)
-        self.std  = np.array(std,  dtype=np.float32)
+        self.std = np.array(std, dtype=np.float32)
         self.transform = transform
 
-        # Here I use "Algorithms and Coding" to convert string permutations to numbers
         self.channel_map = {c: idx for idx, c in enumerate(in_channel_order)}
         self.channel_permutation = [self.channel_map[c] for c in transform.channel_order]
 
     def __call__(self, img, masks=None, boxes=None, labels=None):
-
         img = img.astype(np.float32)
 
         if self.transform.normalize:
@@ -808,17 +558,14 @@ class BackboneTransform(object):
         return img.astype(np.float32), masks, boxes, labels
 
 
-
-
 class BaseTransform(object):
-    """ Transorm to be used when evaluating. """
+    """ Transform to be used when evaluating. """
 
     def __init__(self, mean=MEANS, std=STD):
         self.augment = Compose([
             ConvertFromInts(),
             ToAbsoluteCoords(),
             Resize(resize_gt=True),
-            # Resize(),
             ToPercentCoords(),
             PrepareMasks(cfg.mask_size, cfg.use_gt_bboxes),
             BackboneTransform(cfg.backbone.transform, mean, std, 'BGR')
@@ -827,31 +574,30 @@ class BaseTransform(object):
     def __call__(self, img, masks=None, boxes=None, labels=None):
         return self.augment(img, masks, boxes, labels)
 
+
 import torch.nn.functional as F
+
 
 class FastBaseTransform(torch.nn.Module):
     """
     Transform that does all operations on the GPU for super speed.
-    This doesn't suppport a lot of config settings and should only be used for production.
-    Maintain this as necessary.
     """
 
     def __init__(self):
         super().__init__()
 
         self.mean = torch.Tensor(MEANS).float()[None, :, None, None]
-        self.std  = torch.Tensor( STD ).float()[None, :, None, None]
+        self.std = torch.Tensor(STD).float()[None, :, None, None]
         self.transform = cfg.backbone.transform
 
     def forward(self, img):
         self.mean = self.mean.to(img.device)
-        self.std  = self.std.to(img.device)
-        
-        # img assumed to be a pytorch BGR image with channel order [n, h, w, c]
+        self.std = self.std.to(img.device)
+
         if cfg.preserve_aspect_ratio:
             _, h, w, _ = img.size()
             img_size = Resize.calc_size_preserve_ar(w, h, cfg.max_size)
-            img_size = (img_size[1], img_size[0]) # Pytorch needs h, w
+            img_size = (img_size[1], img_size[0])
         else:
             img_size = (cfg.max_size, cfg.max_size)
 
@@ -864,14 +610,13 @@ class FastBaseTransform(torch.nn.Module):
             img = (img - self.mean)
         elif self.transform.to_float:
             img = img / 255
-        
+
         if self.transform.channel_order != 'RGB':
             raise NotImplementedError
-        
-        img = img[:, (2, 1, 0), :, :].contiguous()
 
-        # Return value is in channel order [n, c, h, w] and RGB
+        img = img[:, (2, 1, 0), :, :].contiguous()
         return img
+
 
 def do_nothing(img=None, masks=None, boxes=None, labels=None):
     return img, masks, boxes, labels
@@ -880,6 +625,7 @@ def do_nothing(img=None, masks=None, boxes=None, labels=None):
 def enable_if(condition, obj):
     return obj if condition else do_nothing
 
+
 class SSDAugmentation(object):
     """ Transform to be used when training. """
 
@@ -887,14 +633,14 @@ class SSDAugmentation(object):
         self.augment = Compose([
             ConvertFromInts(),
             ToAbsoluteCoords(),
-            #enable_if(cfg.augment_photometric_distort, PhotometricDistort()),
-            #enable_if(cfg.augment_expand, Expand(mean)),
-            #enable_if(cfg.augment_random_sample_crop, RandomSampleCrop()),
-            #enable_if(cfg.augment_random_mirror, RandomMirror()),
+            # enable_if(cfg.augment_photometric_distort, PhotometricDistort()),
+            # enable_if(cfg.augment_expand, Expand(mean)),
+            # enable_if(cfg.augment_random_sample_crop, RandomSampleCrop()),
+            # enable_if(cfg.augment_random_mirror, RandomMirror()),
             # enable_if(cfg.augment_random_flip, RandomFlip()),
-            #enable_if(cfg.augment_random_flip, RandomRot90()),
+            # enable_if(cfg.augment_random_flip, RandomRot90()),
             Resize(),
-            #enable_if(not cfg.preserve_aspect_ratio, Pad(cfg.max_size, cfg.max_size, mean)),
+            # enable_if(not cfg.preserve_aspect_ratio, Pad(cfg.max_size, cfg.max_size, mean)),
             ToPercentCoords(),
             PrepareMasks(cfg.mask_size, cfg.use_gt_bboxes),
             BackboneTransform(cfg.backbone.transform, mean, std, 'BGR')
@@ -904,44 +650,242 @@ class SSDAugmentation(object):
         return self.augment(img, masks, boxes, labels)
 
 
+class AlbumentationsImageAugment(object):
+    def __init__(self, policy="medium", p=1.0):
+        """
+        Args:
+            policy (str): 'base', 'light', 'medium', 'heavy' 중 선택
+            p (float): 전체 파이프라인이 적용될 확률
+        """
+        self.policy = policy
+        self.p = p
+        self.transform = self.get_transforms(policy)
+
+    def get_transforms(self, policy):
+        transforms_list = []
+
+        # -----------------------------
+        # 공통: 픽셀 레벨 변환 정의
+        # -----------------------------
+        pixel_transforms = [
+            A.RandomBrightnessContrast(
+                brightness_limit=0.5,
+                contrast_limit=0.4,
+                p=1.0
+            ),
+            A.HueSaturationValue(
+                hue_shift_limit=20,
+                sat_shift_limit=30,
+                val_shift_limit=20,
+                p=1.0
+            ),
+            A.RGBShift(
+                r_shift_limit=20,
+                g_shift_limit=20,
+                b_shift_limit=20,
+                p=1.0
+            ),
+        ]
+
+        # ----------------------------------------------------------
+        # 1. Base: 아무것도 안 함 (Albumentations 파이프라인만 통과)
+        # ----------------------------------------------------------
+        if policy == 'base':
+            return A.Compose(
+                [],
+                bbox_params=self.get_bbox_params(),
+                p=self.p
+            )
+
+        # ----------------------------------------------------------
+        # 2. Light: 픽셀 레벨 변환만 적용 (기하학 X)
+        # ----------------------------------------------------------
+        if policy == 'light':
+            transforms_list.extend(pixel_transforms)
+
+        # ----------------------------------------------------------
+        # 3. Medium: Light + 안전한 기하학적 변환
+        #    - Flip + 약한 Shift/Scale/Rotate
+        # ----------------------------------------------------------
+        elif policy == 'medium':
+            transforms_list.extend([
+                # 좌우/상하 플립
+                A.HorizontalFlip(p=0.5),
+                A.VerticalFlip(p=0.5),
+
+                # 크롭 대신 Shift/Scale/Rotate로 기하학적 다양성 확보
+                A.ShiftScaleRotate(
+                    shift_limit=0.0625,   # ±6.25% 이동
+                    scale_limit=0.2,      # ±20% 확대/축소
+                    rotate_limit=15,      # ±15도 회전
+                    border_mode=cv2.BORDER_CONSTANT,
+                    value=0,              # 빈 공간을 검은색으로 채움 (형광 이미지에 적합)
+                    p=0.5
+                ),
+
+                # 픽셀 변환은 OneOf로 적당히 랜덤하게
+                A.OneOf(pixel_transforms, p=0.8),
+            ])
+
+        # ----------------------------------------------------------
+        # 4. Heavy: Medium + 강한 기하학/노이즈/왜곡
+        # ----------------------------------------------------------
+        elif policy == 'heavy':
+            transforms_list.extend([
+                A.HorizontalFlip(p=0.5),
+                A.VerticalFlip(p=0.5),
+
+                # 더 강한 Shift/Scale/Rotate
+                A.ShiftScaleRotate(
+                    shift_limit=0.1,      # ±10% 이동
+                    scale_limit=0.3,      # ±30% 확대/축소
+                    rotate_limit=30,      # ±30도 회전
+                    border_mode=cv2.BORDER_CONSTANT,
+                    value=0,
+                    p=0.7
+                ),
+
+                # 픽셀 변환 강화
+                A.OneOf([
+                    A.RandomBrightnessContrast(
+                        brightness_limit=0.6,
+                        contrast_limit=0.5,
+                        p=1.0
+                    ),
+                    A.HueSaturationValue(
+                        hue_shift_limit=25,
+                        sat_shift_limit=35,
+                        val_shift_limit=25,
+                        p=1.0
+                    ),
+                    A.RGBShift(
+                        r_shift_limit=30,
+                        g_shift_limit=30,
+                        b_shift_limit=30,
+                        p=1.0
+                    ),
+                ], p=0.8),
+
+                # 이미지 품질 저하 (노이즈, 블러)
+                A.OneOf([
+                    A.GaussNoise(p=1.0),
+                    A.MotionBlur(blur_limit=5, p=1.0),
+                    A.MedianBlur(blur_limit=3, p=1.0),
+                ], p=0.3),
+
+                # 공간 왜곡 (너무 세게 쓰면 박스/마스크가 찌그러지므로 p 낮게)
+                A.OneOf([
+                    A.OpticalDistortion(distort_limit=0.3, p=1.0),
+                    A.GridDistortion(num_steps=5, distort_limit=0.3, p=1.0),
+                ], p=0.1),
+            ])
+
+        # safety: 혹시라도 transforms_list가 비어 있으면 no-op로
+        return A.Compose(
+            transforms_list,
+            bbox_params=self.get_bbox_params(),
+            p=self.p
+        )
+
+    def get_bbox_params(self):
+        return A.BboxParams(
+            format="pascal_voc",
+            min_visibility=0.1,  # 박스 영역 10% 이상 살아있어야 유지
+            label_fields=["bbox_labels"]
+        )
+
+    def __call__(self, image, masks, boxes, labels):
+        # 박스 없으면 그냥 패스
+        if boxes is None or len(boxes) == 0:
+            return image, masks, boxes, labels
+
+        orig_image, orig_masks, orig_boxes, orig_labels = image, masks, boxes, labels
+
+        # masks: (N, H, W) -> list로 변환
+        mask_list = [masks[i] for i in range(masks.shape[0])] if masks is not None else []
+
+        # labels 처리
+        if isinstance(labels, dict) and "labels" in labels:
+            bbox_labels = labels["labels"]
+        else:
+            bbox_labels = np.ones((boxes.shape[0],), dtype=np.int32)
+
+        bboxes = boxes.astype(np.float32).tolist()
+
+        try:
+            transformed = self.transform(
+                image=image,
+                masks=mask_list,
+                bboxes=bboxes,
+                bbox_labels=bbox_labels,
+            )
+        except ValueError as e:
+            print(f"[Aug Fail] {e}")
+            return orig_image, orig_masks, orig_boxes, orig_labels
+
+        out_img = transformed["image"]
+        new_bboxes = np.array(transformed["bboxes"], dtype=np.float32)
+        new_labels = np.array(transformed["bbox_labels"], dtype=bbox_labels.dtype)
+        new_masks_list = transformed["masks"]
+
+        # -------- 정합성 검사 --------
+        if len(new_bboxes) == 0:
+            return orig_image, orig_masks, orig_boxes, orig_labels
+
+        if len(new_masks_list) != len(new_bboxes):
+            return orig_image, orig_masks, orig_boxes, orig_labels
+
+        if len(new_masks_list) > 0:
+            masks_arr = np.stack(new_masks_list, axis=0).astype(np.float32)
+
+            # 너무 작아진 마스크 제거
+            areas = masks_arr.reshape(masks_arr.shape[0], -1).sum(axis=1)
+            keep = areas > 5
+
+            if keep.sum() == 0:
+                return orig_image, orig_masks, orig_boxes, orig_labels
+
+            masks_arr = masks_arr[keep]
+            new_bboxes = new_bboxes[keep]
+            new_labels = new_labels[keep]
+
+            masks_arr = (masks_arr > 0.5).astype(np.float32)
+            out_masks = masks_arr
+        else:
+            out_masks = masks
+
+        # labels dict 업데이트
+        if isinstance(labels, dict):
+            labels_out = labels.copy()
+            labels_out["labels"] = new_labels
+            labels_out["num_crowds"] = int((labels_out["labels"] < 0).sum())
+        else:
+            labels_out = new_labels  # 여기서도 new_labels로 바꿔주는 게 깔끔
+
+        return out_img, out_masks, new_bboxes, labels_out
+
 
 class SSD_ALBU_Augmentation(object):
-    """ Transform to be used when training. """
-
-    def __init__(self, mean=MEANS, std=STD, albumentations_mode="image"):
+    """ 
+    Ablation Study를 위한 메인 Augmentation 클래스 
+    """
+    def __init__(self, mean=MEANS, std=STD, policy="medium"):
         """
-        albumentations_mode:
-          - "image" : 이미지 전체에 대한 Albumentations (1번 실험)
-          - "none"  : Albumentations 사용 안 함 (원본 baseline)
-          (나중에 "instance" 모드 등으로 2,3번 실험 확장 가능)
+        policy: 'base', 'light', 'medium', 'heavy'
         """
-
-        if albumentations_mode == "image":
-            alb_aug = AlbumentationsImageAugment(p=1.0)
-        else:
-            # Augmentation 끄기 (baseline 비교 용도)
-            alb_aug = Lambda(lambda img, masks, boxes, labels: (img, masks, boxes, labels))
-
         self.augment = Compose([
-            ConvertFromInts(),          # uint8 -> float32
-            ToAbsoluteCoords(),         # box 비율 -> 절대좌표 (Albumentations가 쓰기 좋게)
-
-            # --- 여기서 Albumentations 기반 이미지 전체 Augmentation ---
-            alb_aug,
-
-            # 이후는 기존 파이프라인 그대로 유지
-            Resize(),                  # 최종 입력 사이즈로 리사이즈 + 작은 박스 필터
-            ToPercentCoords(),         # 다시 비율좌표로 변환
+            ConvertFromInts(),
+            ToAbsoluteCoords(),
+            
+            # 재정립된 Albumentations 모듈
+            AlbumentationsImageAugment(policy=policy, p=1.0),
+            
+            # 이후 기존 파이프라인 (Resize -> 포맷 변경)
+            Resize(),
+            ToPercentCoords(),
             PrepareMasks(cfg.mask_size, cfg.use_gt_bboxes),
             BackboneTransform(cfg.backbone.transform, mean, std, 'BGR'),
         ])
 
     def __call__(self, img, masks, boxes, labels):
-            # 디버그용 (한 번만 찍고 끄거나, 특정 iter 에서만 찍어도 됨)
-        if masks is not None:
-            if not np.isfinite(masks).all():
-                print("[DEBUG] masks contain NaN/Inf")
-            print("[DEBUG] mask range:", float(masks.min()), float(masks.max()), masks.dtype, masks.shape)
-            # 강제 클램핑도 한번 테스트
-            masks = np.clip(masks, 0.0, 1.0)
         return self.augment(img, masks, boxes, labels)

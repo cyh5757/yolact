@@ -756,7 +756,7 @@ cell_yolact_im700_config = yolact_im700_config.copy({
     }),
 
     # --------- 학습 길이/디버그 ---------
-    'max_iter': 9000,
+    'max_iter': 3000,
     'mask_proto_debug': False,
 
     # --------- 너무 작은 GT/Pred 필터 완화 ---------
