@@ -227,16 +227,81 @@ class EarlyStopping:
 
 
 # -------- Best Checkpoint 관리 --------
-class BestCheckpointManager:
-    """Best 체크포인트 파일 관리 (상위 N개만 유지)"""
-    def __init__(self, root_dir, keep_n=3):
+class ImprovedBestCheckpointManager:
+    """
+    개선된 Best 체크포인트 관리:
+      - warmup_iter 이전에는 절대 저장 안 함
+      - 최근 score_window개의 val score 이동평균 기준으로 판단
+      - 평균이 best_avg + min_improvement 이상일 때만 저장
+      - 상위 N개만 디스크에 유지
+    """
+    def __init__(self, root_dir, keep_n=3,
+                 warmup_iter=cfg.lr_warmup_until,
+                 score_window=3,
+                 min_improvement=0.001):
         self.root_dir = root_dir
         self.keep_n = keep_n
-        self.checkpoints = []  # (score, filepath)
-        
-    def add(self, score, filepath):
-        self.checkpoints.append((score, filepath))
+
+        self.warmup_iter = warmup_iter
+        self.score_window = score_window
+        self.min_improvement = min_improvement
+
+        self.checkpoints = []      # (score, filepath) -> score는 "현재 val_score" 기준
+        self.recent_scores = []    # 최근 score_window개 validation score
+        self.best_avg = float('-inf')   # 이동평균 기준 best
+        self.best_raw = float('-inf')   # 단일 score 기준 best (참고용)
+
+    def should_save(self, score: float, iteration: int):
+        """
+        현재 val_score와 iteration을 받아,
+        - 저장할지 여부(bool),
+        - 이유(str)를 반환
+        """
+        # score NaN / inf / -inf 필터링
+        if score is None or (not math.isfinite(float(score))) or score <= -1e8:
+            return False, f"invalid score ({score})"
+
+        # 1) warmup 구간에서는 저장 안 함
+        if iteration < self.warmup_iter:
+            return False, f"warmup (iter {iteration}/{self.warmup_iter})"
+
+        # 2) 최근 score 목록에 추가
+        self.recent_scores.append(float(score))
+        if len(self.recent_scores) > self.score_window:
+            self.recent_scores.pop(0)
+
+        # 3) 아직 score_window 개수만큼 모이지 않으면 평균 판단 보류
+        if len(self.recent_scores) < self.score_window:
+            return False, f"collecting scores ({len(self.recent_scores)}/{self.score_window})"
+
+        # 4) 이동 평균 계산
+        avg_score = sum(self.recent_scores) / len(self.recent_scores)
+
+        # 5) 의미 있는 개선인지 확인
+        if avg_score > (self.best_avg + self.min_improvement):
+            # 이동평균 기준 best 갱신
+            self.best_avg = avg_score
+
+            # raw 기준 best도 함께 업데이트(편의상)
+            if score > self.best_raw:
+                self.best_raw = float(score)
+
+            return True, f"new best avg: {avg_score:.4f} (raw {score:.4f})"
+
+        return False, (
+            f"no improvement (current avg: {avg_score:.4f}, "
+            f"best_avg: {self.best_avg:.4f})"
+        )
+
+    def add(self, score: float, filepath: str):
+        """
+        score(현재 val_score)와 filepath를 관리 리스트에 추가하고,
+        상위 keep_n개만 남기면서 나머지는 삭제
+        """
+        self.checkpoints.append((float(score), filepath))
+        # score 기준 내림차순 정렬
         self.checkpoints.sort(key=lambda x: x[0], reverse=True)
+
         if self.keep_n > 0 and len(self.checkpoints) > self.keep_n:
             for _, old_path in self.checkpoints[self.keep_n:]:
                 if os.path.exists(old_path):
@@ -246,8 +311,11 @@ class BestCheckpointManager:
                     except Exception as e:
                         print(f"[BestMgr] Failed to remove {old_path}: {e}")
             self.checkpoints = self.checkpoints[:self.keep_n]
-    
+
     def get_best(self):
+        """
+        최고 raw score의 체크포인트 반환 (없으면 (-inf, None))
+        """
         return self.checkpoints[0] if self.checkpoints else (float('-inf'), None)
 
 
@@ -920,11 +988,15 @@ def train():
         )
         print(f"[EarlyStopping] Enabled with patience={args.patience}, min_delta={args.min_delta}, prefer={args.prefer_metric}")
 
-    # Best Checkpoint Manager
-    best_ckpt_mgr = BestCheckpointManager(
+    # Best Checkpoint Manager (개선 버전: warmup + moving average)
+    best_mgr = ImprovedBestCheckpointManager(
         root_dir=args.save_folder,
-        keep_n=args.keep_best_n
+        keep_n=args.keep_best_n,
+        warmup_iter=5000,        # 필요하면 나중에 CLI 옵션으로 뺄 수 있음
+        score_window=3,
+        min_improvement=args.min_delta  # ES와 비슷한 스케일 사용
     )
+
 
     # NaN streak 추적
     nan_streak = 0
@@ -1312,6 +1384,7 @@ def train():
                             except Exception: pass
 
             # epoch마다 validation
+            # epoch마다 validation
             if args.validation_epoch > 0:
                 if epoch % args.validation_epoch == 0 and epoch > 0 and val_dataset is not None:
                     val_info = compute_validation_map(epoch, iteration, yolact_net, val_dataset,
@@ -1319,22 +1392,31 @@ def train():
                     # 현재 점수 계산
                     val_score = pick_val_score(val_info, args.prefer_metric)
 
-                    # Best 체크포인트 저장
+                    # Best 체크포인트 저장 (개선 버전)
                     if args.save_best and isinstance(val_info, dict):
-                        if val_score > best_score:
-                            best_score = val_score
+                        should_save, reason = best_mgr.should_save(val_score, iteration)
+                        print(f"[BEST] {reason}")
+                        if should_save:
+                            # raw 기준 best 갱신
+                            if val_score > best_score:
+                                best_score = val_score
+
                             ckpt_path, alias = save_as_best(
-                                yolact_net, score=best_score, epoch=epoch,
+                                yolact_net, score=val_score, epoch=epoch,
                                 iteration=iteration, root_dir=args.save_folder,
                                 alias_name=args.best_alias
                             )
-                            best_ckpt_mgr.add(best_score, ckpt_path)
+                            best_mgr.add(val_score, ckpt_path)
+
                             if wandb_logger is not None:
                                 wandb_logger.log_scalar_dict(step=iteration, d={
-                                    'best/score': float(best_score),
+                                    'best/raw_score': float(val_score),
+                                    'best/best_raw_score': float(best_score),
+                                    'best/best_avg_score': float(best_mgr.best_avg),
                                     'best/iter': int(iteration),
                                     'best/epoch': int(epoch),
                                 })
+
 
                     # Early Stopping 체크 + 매회 로그
                     if early_stopper is not None and isinstance(val_info, dict):
@@ -1356,28 +1438,36 @@ def train():
                             raise KeyboardInterrupt  # 학습 종료
 
         # 마지막 validation (루프 종료 후)
+        # 마지막 validation (루프 종료 후)
         if args.validation_epoch > 0 and val_dataset is not None:
             val_info = compute_validation_map(epoch, iteration, yolact_net, val_dataset,
                                               log if args.log else None, wandb_logger=wandb_logger)
             val_score = pick_val_score(val_info, args.prefer_metric)
+
             if args.save_best and isinstance(val_info, dict):
-                if val_score > best_score:
-                    best_score = val_score
+                should_save, reason = best_mgr.should_save(val_score, iteration)
+                print(f"[BEST][final] {reason}")
+                if should_save:
+                    if val_score > best_score:
+                        best_score = val_score
                     ckpt_path, alias = save_as_best(
-                        yolact_net, score=best_score, epoch=epoch,
+                        yolact_net, score=val_score, epoch=epoch,
                         iteration=iteration, root_dir=args.save_folder,
                         alias_name=args.best_alias
                     )
-                    best_ckpt_mgr.add(best_score, ckpt_path)
+                    best_mgr.add(val_score, ckpt_path)
                     if wandb_logger is not None:
                         wandb_logger.log_scalar_dict(step=iteration, d={
-                            'best/score': float(best_score),
+                            'best/raw_score': float(val_score),
+                            'best/best_raw_score': float(best_score),
+                            'best/best_avg_score': float(best_mgr.best_avg),
                             'best/iter': int(iteration),
                             'best/epoch': int(epoch),
                         })
         else:
             # 검증 비활성 시 라스트 저장용 점수 없음
             val_score = None
+
 
         # 정상 종료 → 라스트 저장
         if args.save_last:
@@ -1422,10 +1512,13 @@ def train():
 
     print("\n=== Training Complete ===")
     if best_score > float('-inf'):
-        print(f"Best validation score: {best_score:.4f}")
+        print(f"Best validation raw score (among saved checkpoints): {best_score:.4f}")
+    if 'best_mgr' in locals() and best_mgr.best_avg > float('-inf'):
+        print(f"Best validation moving-average score: {best_mgr.best_avg:.4f}")
     
     if wandb_logger is not None:
         wandb_logger.finish()
+
 
 
 if __name__ == '__main__':

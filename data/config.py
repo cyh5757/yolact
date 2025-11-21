@@ -350,6 +350,7 @@ activation_func = Config({
     'relu':    lambda x: torch.nn.functional.relu(x, inplace=True),
     'gelu':    torch.nn.functional.gelu,
     'leaky_relu': lambda x: torch.nn.functional.leaky_relu(x, negative_slope=0.01, inplace=True),
+    'SiLU' : torch.nn.SiLU(),
     'none':    lambda x: x,
 })
 
