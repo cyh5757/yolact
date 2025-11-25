@@ -60,12 +60,12 @@ python train.py \
   --validation_size=10 \
   --use_wandb=True \
   --wandb_project=YOLACT-Cell \
-  --wandb_name=251113_adamwr_cosrestart_lr2e4_wd1e2 \
-  --exp_dir=/home/mbd1234/yolact/experiments/251113_adamwr_cosrestart_lr2e4_wd1e2 \
+  --wandb_name=251125_1019_Loss_I \
+  --exp_dir=/home/mbd1234/yolact/experiments/251125_1019_Loss_I \
   --no_autoscale \
   --early_stop=True \
   --patience=80 \
-  --prefer_metric=mask_only
+  --prefer_metric=mask_box_avg
   # 필요하면 --cosine_t0=300 같이 추가해서 첫 사이클 길이 직접 지정
 
 
@@ -74,10 +74,10 @@ python train.py \
 최신 명령어
 #이미지만만 + 모델 통계/플롭스
 python eval.py \
-  --trained_model  /home/mbd1234/yolact/experiments/251118_1020_Augmentation_3000/weights/best_iter0002800_ep069_score14.8700.pth \
+  --trained_model  /home/mbd1234/yolact/experiments/251124_1050_Distilated_Heavy_3000/weights/best_iter0001760_ep043_score19.2300.pth \
   --config cell_yolact_im700_config \
   --cuda True \
-  --images /home/mbd1234/data/yolo_set_3/images/val:/home/mbd1234/data/Data_Analyze/preview/eval_testing_251118_1020/val_best \
+  --images /home/mbd1234/data/yolo_set_3/images/val:/home/mbd1234/data/Data_Analyze/preview/eval_testing_251124_1050/val_best \
   --score_threshold 0.05 \
   --top_k 1000 \
   --fast_nms True \
@@ -89,7 +89,7 @@ python eval.py \
   --model_stats True \
   --flops_hw 700x700 \
   --flops_use_dummy True \
-  --stats_csv /home/mbd1234/data/Data_Analyze/preview/eval_testing_251118_1020/best_stats.csv \
+  --stats_csv /home/mbd1234/data/Data_Analyze/preview/eval_testing_251124_1050/best_stats.csv \
   --compute_aji False
 
 
@@ -98,29 +98,29 @@ python eval.py \
 
 #점수까지
 python eval.py \
-  --trained_model /home/mbd1234/yolact/weights/triage_noamp_bs1_lr1e4/best_iter000960_ep023_score21.1200_30.1400.pth \
+  --trained_model /home/mbd1234/yolact/experiments/251125_1019_Loss_I/weights/best_iter0001560_ep038_score19.7400.pth \
   --config cell_yolact_im700_config \
   --cuda True \
   --score_threshold 0.05 \
   --top_k 300 \
   --fast_nms True \
   --cross_class_nms False \
-  --display_bboxes False \
-  --display_masks False \
+  --display_bboxes True \
+  --display_masks True \
   --display_text False \
   --display_scores False \
   --coco_images_dir /home/mbd1234/data/yolo_set_3/images/val \
   --coco_ann_file  /home/mbd1234/data/yolo_set_3/annotations/instances_val.json \
   --max_images -1 \
   --output_coco_json \
-  --export_coco  /home/mbd1234/data/Data_Analyze/preview/eval_testing_11051712/preds_instances_val.json \
-  --metrics_csv  /home/mbd1234/data/Data_Analyze/preview/eval_testing_11051712/metrics.csv \
+  --export_coco  /home/mbd1234/data/Data_Analyze/preview/eval_testing_251125_1019_Loss_I/preds_instances_val.json \
+  --metrics_csv  /home/mbd1234/data/Data_Analyze/preview/eval_testing_251125_1019_Loss_I/metrics.csv \
   --profile_infer True \
   --profile_warmup 2 \
-  --profile_csv   /home/mbd1234/data/Data_Analyze/preview/eval_testing_11051712/profile.csv \
+  --profile_csv   /home/mbd1234/data/Data_Analyze/preview/eval_testing_251125_1019_Loss_I/profile.csv \
   --model_stats True \
   --flops_hw 700x700 \
   --flops_use_dummy False \
-  --stats_csv     /home/mbd1234/data/Data_Analyze/preview/eval_testing_11051712/stats.csv \
+  --stats_csv     /home/mbd1234/data/Data_Analyze/preview/eval_testing_251125_1019_Loss_I/stats.csv \
   --compute_aji True \
   --aji_mask_thresh 0.5

@@ -138,12 +138,29 @@ class MultiBoxLoss(nn.Module):
         
         losses = {}
 
-        # Localization Loss (Smooth L1)
+        # --------------------------------------------------
+        # B: Localization Loss (Smooth L1) + size-aware weight
+        # --------------------------------------------------
         if cfg.train_boxes:
             loc_p = loc_data[pos_idx].view(-1, 4)
-            loc_t = loc_t[pos_idx].view(-1, 4)
-            losses['B'] = F.smooth_l1_loss(loc_p, loc_t, reduction='sum') * cfg.bbox_alpha
+            loc_t_pos = loc_t[pos_idx].view(-1, 4)
 
+            # GT box (point-form) for 각 positive anchor
+            pos_gt_boxes = gt_box_t[pos_idx].view(-1, 4)
+
+            # per-positive size weight (small/med/large)
+            with torch.no_grad():
+                size_w_b = self._get_size_weights(pos_gt_boxes)  # [N_pos]
+
+            # 원래 sum 대신, per-anchor loss에 weight 곱
+            bbox_loss_raw = F.smooth_l1_loss(loc_p, loc_t_pos, reduction='none')  # [N_pos, 4]
+            bbox_loss_raw = bbox_loss_raw.sum(dim=1)  # [N_pos]
+
+            losses['B'] = (bbox_loss_raw * size_w_b).sum() * cfg.bbox_alpha
+
+        # --------------------
+        # M: Mask Loss
+        # --------------------
         if cfg.train_masks:
             if cfg.mask_type == mask_type.direct:
                 if cfg.use_gt_bboxes:
@@ -179,7 +196,7 @@ class MultiBoxLoss(nn.Module):
                 losses['C'] = self.focal_conf_loss(conf_data, conf_t)
         else:
             if cfg.use_objectness_score:
-                losses['C'] = self.conf_objectness_loss(conf_data, conf_t, batch_size, loc_p, loc_t, priors)
+                losses['C'] = self.conf_objectness_loss(conf_data, conf_t, batch_size, loc_p, loc_t_pos, priors)
             else:
                 losses['C'] = self.ohem_conf_loss(conf_data, conf_t, pos, batch_size)
 
@@ -495,6 +512,40 @@ class MultiBoxLoss(nn.Module):
         # and all the losses will be divided by num_pos at the end, so just one extra time.
         return cfg.mask_proto_coeff_diversity_alpha * loss.sum() / num_pos
 
+    # -----------------------------------------
+    # size-aware weight helper
+    # -----------------------------------------
+    def _get_size_weights(
+        self,
+        boxes,            # (92 * 92) / (1024*1024) : 0.008
+        small_thr=0.002,   # area < 0.002 → small
+        large_thr=0.01,   # area > 0.01 → large
+        small_w=0.5,      # small box weight
+        med_w=1.0,        # medium box weight
+        large_w=1.3       # large box weight
+    ):
+        """
+        boxes: [N, 4], point-form (xmin, ymin, xmax, ymax), 0~1 normalized
+        return: [N] size weight
+        """
+        if boxes.numel() == 0:
+            return torch.tensor([], device=boxes.device)
+
+        widths  = (boxes[:, 2] - boxes[:, 0]).clamp(min=0)
+        heights = (boxes[:, 3] - boxes[:, 1]).clamp(min=0)
+        areas   = widths * heights  # [N]
+
+        weights = torch.ones_like(areas, device=boxes.device)
+
+        small_mask  = areas < small_thr
+        large_mask  = areas > large_thr
+        medium_mask = (~small_mask) & (~large_mask)
+
+        weights[small_mask]  = small_w
+        weights[medium_mask] = med_w
+        weights[large_mask]  = large_w
+
+        return weights.detach()
 
     def lincomb_mask_loss(self, pos, idx_t, loc_data, mask_data, priors, proto_data, masks, gt_box_t, score_data, inst_data, labels, interpolation_mode='bilinear'):
         mask_h = proto_data.size(1)
@@ -620,6 +671,19 @@ class MultiBoxLoss(nn.Module):
                 gt_box_height = pos_gt_csize[:, 3] * mask_h
                 pre_loss = pre_loss.sum(dim=(0, 1)) / gt_box_width / gt_box_height * weight
 
+            # ---- 여기서부터 size-aware mask weight 적용 ----
+
+            # pre_loss shape 통일: [num_pos]
+            if pre_loss.dim() == 3:
+                # [h, w, num_pos] -> [num_pos]
+                pre_loss = pre_loss.sum(dim=(0, 1))
+
+            # size weight (GT box 기준)
+            if process_gt_bboxes:
+                with torch.no_grad():
+                    size_w_m = self._get_size_weights(pos_gt_box_t)  # [num_pos]
+                pre_loss = pre_loss * size_w_m
+
             # If the number of masks were limited scale the loss accordingly
             if old_num_pos > num_pos:
                 pre_loss *= old_num_pos / num_pos
@@ -640,12 +704,25 @@ class MultiBoxLoss(nn.Module):
                     label_t = label_t[select]
 
                 maskiou_net_input = pred_masks.permute(2, 0, 1).contiguous().unsqueeze(1)
-                pred_masks = pred_masks.gt(0.5).float()                
-                maskiou_t = self._mask_iou(pred_masks, mask_t)
+                pred_masks_bin = pred_masks.gt(0.5).float()
+
+                # 빈 mask 필터 (안전장치)
+                pred_mask_area = torch.sum(pred_masks_bin, dim=(0, 1))
+                valid_mask = pred_mask_area > 0
+
+                if torch.sum(valid_mask) < 1:
+                    continue
+
+                pred_masks_bin = pred_masks_bin[:, :, valid_mask]
+                mask_t_valid   = mask_t[:, :, valid_mask]
+                label_t_valid  = label_t[valid_mask]
+                maskiou_net_input = maskiou_net_input[valid_mask]
+
+                maskiou_t = self._mask_iou(pred_masks_bin, mask_t_valid)
                 
                 maskiou_net_input_list.append(maskiou_net_input)
                 maskiou_t_list.append(maskiou_t)
-                label_t_list.append(label_t)
+                label_t_list.append(label_t_valid)
         
         losses = {'M': loss_m * cfg.mask_alpha / mask_h / mask_w}
         
@@ -678,8 +755,24 @@ class MultiBoxLoss(nn.Module):
         area1 = torch.sum(mask1, dim=(0, 1))
         area2 = torch.sum(mask2, dim=(0, 1))
         union = (area1 + area2) - intersection
-        ret = intersection / union
+
+        # ✅ NaN / Inf 방지용 epsilon
+        eps = 1e-6
+
+        # union이 0인 경우(둘 다 완전 빈 마스크 등)는 IoU = 0으로 처리
+        zero_union = union <= eps
+        union_safe = union + eps
+
+        ret = intersection / union_safe
+
+        # union이 사실상 0인 경우는 강제로 0으로
+        ret = torch.where(zero_union, torch.zeros_like(ret), ret)
+
+        # 마지막 방어막: 혹시 남은 NaN / Inf 정리
+        ret = torch.nan_to_num(ret, nan=0.0, posinf=1.0, neginf=0.0)
+
         return ret
+
 
     def mask_iou_loss(self, net, maskiou_targets):
         maskiou_net_input, maskiou_t, label_t = maskiou_targets

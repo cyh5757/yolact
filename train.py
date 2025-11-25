@@ -118,7 +118,7 @@ parser.add_argument('--save_best', default=True, type=str2bool,
 parser.add_argument('--best_alias', default='best.pth', type=str,
                     help='가장 최근 best 모델의 별칭 파일명')
 parser.add_argument('--prefer_metric', default='mask_only', type=str,
-                    choices=['mask_first','box_first','mask_only','box_only'],
+                    choices=['mask_first','box_first','mask_only','box_only','mask_box_avg'],
                     help='best 판단 시 어떤 지표를 우선할지')
 
 # ---- Last 저장 옵션 ----
@@ -706,6 +706,17 @@ def pick_val_score(val_info: dict, prefer: str = 'mask_only') -> float:
         _dig_first_float(val_info.get('boxes'))
     )
 
+    # 🔥 새로 추가: box/mask 평균을 metric으로 쓰는 모드
+    if prefer == 'mask_box_avg':
+        if mask_map is not None and box_map is not None:
+            return float(0.5 * (mask_map + box_map))   # (box + mask) / 2
+        elif mask_map is not None:
+            return float(mask_map)
+        elif box_map is not None:
+            return float(box_map)
+        else:
+            return float('-inf')
+
     if prefer == 'mask_only':
         return float(mask_map) if mask_map is not None else float('-inf')
     if prefer == 'box_only':
@@ -714,6 +725,8 @@ def pick_val_score(val_info: dict, prefer: str = 'mask_only') -> float:
         return float(mask_map) if mask_map is not None else (float(box_map) if box_map is not None else float('-inf'))
     if prefer == 'box_first':
         return float(box_map) if box_map is not None else (float(mask_map) if mask_map is not None else float('-inf'))
+
+    # fallback: mask 우선
     return float(mask_map) if mask_map is not None else (float(box_map) if box_map is not None else float('-inf'))
 
 
@@ -944,7 +957,8 @@ def train():
     dataset = COCODetection(
         image_path=cfg.dataset.train_images,
         info_file=cfg.dataset.train_info,
-        transform=SSD_ALBU_Augmentation(mean=MEANS, std=STD, policy="heavy")
+        #transform=SSD_ALBU_Augmentation(mean=MEANS, std=STD, policy="heavy")
+        transform=SSDAugmentation(MEANS)
     )
     val_dataset = None
     if args.validation_epoch > 0:
@@ -992,7 +1006,7 @@ def train():
     best_mgr = ImprovedBestCheckpointManager(
         root_dir=args.save_folder,
         keep_n=args.keep_best_n,
-        warmup_iter=5000,        # 필요하면 나중에 CLI 옵션으로 뺄 수 있음
+        warmup_iter=cfg.lr_warmup_until,        # 필요하면 나중에 CLI 옵션으로 뺄 수 있음
         score_window=3,
         min_improvement=args.min_delta  # ES와 비슷한 스케일 사용
     )

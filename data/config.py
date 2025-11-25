@@ -406,7 +406,7 @@ coco_base_config = Config({
 
     # For each lr step, what to multiply the lr with
     'gamma': 0.1,
-    'lr_steps': (280000, 360000, 400000),
+    'lr_steps': (15000, 20000, 24000),
 
     # Initial learning rate to linearly warmup from (if until > 0)
     'lr_warmup_init': 2e-5,
@@ -616,12 +616,12 @@ coco_base_config = Config({
     'maskiou_net': [],
 
     # Discard predicted masks whose area is less than this
-    'discard_mask_area': -1,
+    'discard_mask_area': 10,
 
     'maskiou_alpha': 1.0,
     'rescore_mask': False,
     'rescore_bbox': False,
-    'maskious_to_train': -1,
+    'maskious_to_train': 100,
 })
 
 
@@ -663,7 +663,7 @@ yolact_base_config = coco_base_config.copy({
 
     # Mask Settings
     'mask_type': mask_type.lincomb,
-    'mask_alpha': 6.125,
+    'mask_alpha': 10,
     'mask_proto_src': 0,
     'mask_proto_net': [(256, 3, {'padding': 1})] * 3 + [(None, -2, {}), (256, 3, {'padding': 1})] + [(32, 1, {})],
     'mask_proto_normalize_emulate_roi_pooling': True,
@@ -716,26 +716,26 @@ cell_yolact_im700_config = yolact_im700_config.copy({
     'mask_type': mask_type.lincomb,             # 세포 도메인 권장
     'mask_size': 128,                            # 16 → 28 경계 손실 완화 - mask_tyep direct 일때만 사용
     'mask_proto_src': 0,
-    'mask_proto_net': [(256, 3, {'padding': 1})] * 3 + [(None, -2, {}), (256, 3, {'padding': 1})] + [(32, 1, {})],
+    # 'mask_proto_net': [(256, 3, {'padding': 1})] * 3 + [(None, -2, {}), (256, 3, {'padding': 1})] + [(32, 1, {})],
     # dilation으로 receptive field 확장
-    # 'mask_proto_net': [
-    #     (256, 3, {'padding': 1}),
-    #     (256, 3, {'padding': 2, 'dilation': 2}),
-    #     (256, 3, {'padding': 4, 'dilation': 4}),
-    #     (None, -2, {}),
-    #     (256, 3, {'padding': 1}),
-    #     (32, 1, {})
-    # ],
+    'mask_proto_net': [
+        (256, 3, {'padding': 1}),
+        (256, 3, {'padding': 2, 'dilation': 2}),
+        (256, 3, {'padding': 4, 'dilation': 4}),
+        (None, -2, {}),
+        (256, 3, {'padding': 1}),
+        (32, 1, {})
+    ],
     
     'mask_proto_normalize_emulate_roi_pooling': True,
     'mask_proto_crop': True,
     'mask_proto_crop_with_pred_box': False,
 
     # --------- MaskIoU로 점수 재보정 ---------
-    'use_maskiou': False,
+    'use_maskiou': True,
     'maskiou_net': [(8, 3, {'stride': 2}), (16, 3, {'stride': 2}), (32, 3, {'stride': 2}),
                     (64, 3, {'stride': 2}), (128, 3, {'stride': 2})],
-    'maskiou_alpha': 25,
+    'maskiou_alpha': 5,
     'rescore_mask': True,
     'rescore_bbox': False,
 
