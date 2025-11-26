@@ -601,7 +601,7 @@ class MultiBoxLoss(nn.Module):
         large_thr=0.01,   # area > 0.01 → large
         small_w=0.5,      # small box weight
         med_w=1.0,        # medium box weight
-        large_w=1.3       # large box weight
+        large_w=2.0       # large box weight
     ):
         """
         boxes: [N, 4], point-form (xmin, ymin, xmax, ymax), 0~1 normalized
@@ -642,6 +642,9 @@ class MultiBoxLoss(nn.Module):
         maskiou_t_list = []
         maskiou_net_input_list = []
         label_t_list = []
+
+        # Dice weight (config에 없으면 기본 1.0 사용)
+        lambda_dice = getattr(cfg, 'mask_dice_alpha', 1.0)
 
         for idx in range(mask_data.size(0)):
             with torch.no_grad():
@@ -718,19 +721,23 @@ class MultiBoxLoss(nn.Module):
 
             # Size: [mask_h, mask_w, num_pos]
             pred_masks = proto_masks @ proto_coef.t()
-            pred_masks = cfg.mask_proto_mask_activation(pred_masks)
+            pred_masks = cfg.mask_proto_mask_activation(pred_masks)  # 보통 sigmoid → 확률
 
+            # 선택적 double loss (원래 코드 유지)
             if cfg.mask_proto_double_loss:
                 if cfg.mask_proto_mask_activation == activation_func.sigmoid:
-                    pre_loss = F.binary_cross_entropy(torch.clamp(pred_masks, 0, 1), mask_t, reduction='sum')
+                    pre_loss_double = F.binary_cross_entropy(torch.clamp(pred_masks, 0, 1), mask_t, reduction='sum')
                 else:
-                    pre_loss = F.smooth_l1_loss(pred_masks, mask_t, reduction='sum')
+                    pre_loss_double = F.smooth_l1_loss(pred_masks, mask_t, reduction='sum')
                 
-                loss_m += cfg.mask_proto_double_loss_alpha * pre_loss
+                loss_m += cfg.mask_proto_double_loss_alpha * pre_loss_double
 
             if cfg.mask_proto_crop:
                 pred_masks = crop(pred_masks, pos_gt_box_t)
-            
+
+            # -------------------------
+            # 1) BCE part (기존 로직 유지)
+            # -------------------------
             if cfg.mask_proto_mask_activation == activation_func.sigmoid:
                 pre_loss = F.binary_cross_entropy(torch.clamp(pred_masks, 0, 1), mask_t, reduction='none')
             else:
@@ -750,25 +757,46 @@ class MultiBoxLoss(nn.Module):
                 gt_box_height = pos_gt_csize[:, 3] * mask_h
                 pre_loss = pre_loss.sum(dim=(0, 1)) / gt_box_width / gt_box_height * weight
 
-            # ---- 여기서부터 size-aware mask weight 적용 ----
-
-            # pre_loss shape 통일: [num_pos]
+            # pre_loss: [h, w, num_pos] or [num_pos]
             if pre_loss.dim() == 3:
-                # [h, w, num_pos] -> [num_pos]
-                pre_loss = pre_loss.sum(dim=(0, 1))
+                pre_loss = pre_loss.sum(dim=(0, 1))  # [num_pos]
 
-            # size weight (GT box 기준)
+            # size-aware weight (GT box 기준)
+            size_w_m = None
             if process_gt_bboxes:
                 with torch.no_grad():
                     size_w_m = self._get_size_weights(pos_gt_box_t)  # [num_pos]
-                pre_loss = pre_loss * size_w_m
+                pre_loss = pre_loss * size_w_m  # BCE에만 우선 적용
 
             # If the number of masks were limited scale the loss accordingly
             if old_num_pos > num_pos:
                 pre_loss *= old_num_pos / num_pos
 
-            loss_m += torch.sum(pre_loss)
+            bce_term = torch.sum(pre_loss)  # scalar
 
+            # -------------------------
+            # 2) Dice part 추가
+            # -------------------------
+            dice_term = 0.0
+            if lambda_dice > 0:
+                # pred_masks, mask_t : [h, w, num_pos]
+                dice_per_mask = self._dice_loss_from_probs(pred_masks, mask_t)   # [num_pos]
+
+                # size weight도 Dice에 같이 적용할지 여부
+                if (size_w_m is not None) and (dice_per_mask.numel() == size_w_m.numel()):
+                    dice_per_mask = dice_per_mask * size_w_m
+
+                if old_num_pos > num_pos:
+                    dice_per_mask *= old_num_pos / num_pos
+
+                dice_term = lambda_dice * dice_per_mask.sum()  # scalar
+
+            # 최종 mask loss에 BCE + λ·Dice 더하기
+            loss_m += (bce_term + dice_term)
+
+            # -------------------------
+            # 3) MaskIoU 쪽은 기존 로직 그대로
+            # -------------------------
             if cfg.use_maskiou:
                 if cfg.discard_mask_area > 0:
                     gt_mask_area = torch.sum(mask_t, dim=(0, 1))
@@ -864,3 +892,36 @@ class MultiBoxLoss(nn.Module):
         loss_i = F.smooth_l1_loss(maskiou_p, maskiou_t, reduction='sum')
         
         return loss_i * cfg.maskiou_alpha
+
+
+    def _dice_loss_from_probs(self, probs, targets, eps=1e-6):
+        """
+        probs, targets: [H, W, N] 또는 [N, H, W] 형태, 값은 [0, 1] 범위라고 가정
+        return: per-mask Dice loss [N]
+        """
+        if probs.dim() == 3 and probs.shape[2] == targets.shape[2]:
+            # [H, W, N] -> [N, HW]
+            N = probs.shape[2]
+            probs_flat   = probs.permute(2, 0, 1).contiguous().view(N, -1)      # [N, HW]
+            targets_flat = targets.permute(2, 0, 1).contiguous().view(N, -1)    # [N, HW]
+        elif probs.dim() == 3 and probs.shape[0] == targets.shape[0]:
+            # [N, H, W]
+            N = probs.shape[0]
+            probs_flat   = probs.view(N, -1)
+            targets_flat = targets.view(N, -1)
+        else:
+            raise ValueError(f"Unexpected shape for dice loss: probs={probs.shape}, targets={targets.shape}")
+
+        intersection = (probs_flat * targets_flat).sum(dim=1)        # [N]
+        union        = probs_flat.sum(dim=1) + targets_flat.sum(dim=1)   # [N]
+
+        # union이 사실상 0인 경우(둘 다 거의 빈 마스크)는 Dice=0 loss=0으로 두는 쪽으로 처리
+        zero_union = union <= eps
+        dice = (2.0 * intersection + eps) / (union + eps)
+        loss = 1.0 - dice
+
+        # union 거의 0인 경우는 Dice loss=0으로
+        loss = torch.where(zero_union, torch.zeros_like(loss), loss)
+
+        return loss  # [N]
+

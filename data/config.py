@@ -738,14 +738,15 @@ cell_yolact_im700_config = yolact_im700_config.copy({
     'maskiou_alpha': 5,
     'rescore_mask': True,
     'rescore_bbox': False,
+    'mask_dice_alpha' : 1.0,
 
-    # --------- 앵커(작게 더 촘촘히) ---------
+    # --------- 앵커(크게) ---------
     'backbone': resnet101_backbone.copy({
         'selected_layers': list(range(1, 4)),
         'use_pixel_scales': True,
         'preapply_sqrt': False,
         'use_square_anchors': True,
-        'pred_aspect_ratios': [ [[0.65, 0.84, 1.0, 2.1]] ] * 5,
+        'pred_aspect_ratios': [ [[0.5, 0.84, 1.0, 2.1]] ] * 5,
         # 1024 해상도 기준 소물체 대응용으로 16 추가
         'pred_scales': [
             [32, 48, 64],          # P3 (작게)
