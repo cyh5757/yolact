@@ -522,7 +522,7 @@ coco_base_config = Config({
     'semantic_segmentation_alpha': 1,
 
     # Adds another branch to the netwok to predict Mask IoU.
-    'use_mask_scoring': False,
+    'use_mask_scoring': True,
     'mask_scoring_alpha': 1,
 
     # Match gt boxes using the Box2Pix change metric instead of the standard IoU metric.
@@ -673,7 +673,7 @@ yolact_base_config = coco_base_config.copy({
     'extra_head_net': [(256, 3, {'padding': 1})],
 
     'positive_iou_threshold': 0.5,
-    'negative_iou_threshold': 0.4,
+    'negative_iou_threshold': 0.5,
 
     'crowd_iou_threshold': 0.7,
 

@@ -55,7 +55,7 @@ python train.py \
   --scheduler=cosine_restart \
   --lr=2e-4 \
   --decay=0.01 \
-  --cosine_tmult=2.0 \
+  --cosine_tmult=2 \
   --validation_epoch=1 \
   --validation_size=10 \
   --use_wandb=True \
@@ -74,10 +74,10 @@ python train.py \
 최신 명령어
 #이미지만만 + 모델 통계/플롭스
 python eval.py \
-  --trained_model  /home/mbd1234/yolact/experiments/251124_1050_Distilated_Heavy_3000/weights/best_iter0001760_ep043_score19.2300.pth \
+  --trained_model  /home/mbd1234/yolact/experiments/251125_1019_Loss_I_NonAug/weights/best_iter0001360_ep033_score23.3200.pth \
   --config cell_yolact_im700_config \
   --cuda True \
-  --images /home/mbd1234/data/yolo_set_3/images/val:/home/mbd1234/data/Data_Analyze/preview/eval_testing_251124_1050/val_best \
+  --images /home/mbd1234/data/yolo_set_3/images/val:/home/mbd1234/data/Data_Analyze/preview/eval_testing_251125_1800_NonAug/val_best \
   --score_threshold 0.05 \
   --top_k 1000 \
   --fast_nms True \
@@ -89,7 +89,7 @@ python eval.py \
   --model_stats True \
   --flops_hw 700x700 \
   --flops_use_dummy True \
-  --stats_csv /home/mbd1234/data/Data_Analyze/preview/eval_testing_251124_1050/best_stats.csv \
+  --stats_csv /home/mbd1234/data/Data_Analyze/preview/eval_testing_251125_1800_NonAug/best_stats.csv \
   --compute_aji False
 
 

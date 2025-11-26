@@ -141,22 +141,53 @@ class MultiBoxLoss(nn.Module):
         # --------------------------------------------------
         # B: Localization Loss (Smooth L1) + size-aware weight
         # --------------------------------------------------
+        # if cfg.train_boxes:
+        #     loc_p = loc_data[pos_idx].view(-1, 4)
+        #     loc_t_pos = loc_t[pos_idx].view(-1, 4)
+
+        #     # GT box (point-form) for 각 positive anchor
+        #     pos_gt_boxes = gt_box_t[pos_idx].view(-1, 4)
+
+        #     # per-positive size weight (small/med/large)
+        #     with torch.no_grad():
+        #         size_w_b = self._get_size_weights(pos_gt_boxes)  # [N_pos]
+
+        #     # 원래 sum 대신, per-anchor loss에 weight 곱
+        #     bbox_loss_raw = F.smooth_l1_loss(loc_p, loc_t_pos, reduction='none')  # [N_pos, 4]
+        #     bbox_loss_raw = bbox_loss_raw.sum(dim=1)  # [N_pos]
+
+        #     losses['B'] = (bbox_loss_raw * size_w_b).sum() * cfg.bbox_alpha
+
+        # --------------------------------------------------
+        # B: Localization Loss (GIoU-based) + size-aware weight
+        # --------------------------------------------------
         if cfg.train_boxes:
-            loc_p = loc_data[pos_idx].view(-1, 4)
-            loc_t_pos = loc_t[pos_idx].view(-1, 4)
+            # 1) positive anchor에 대한 offset (loc_p) 모으기
+            loc_p     = loc_data[pos_idx].view(-1, 4)   # [N_pos, 4] (offset space)
+            loc_t_pos = loc_t[pos_idx].view(-1, 4)      # 필요하면 디버깅용
 
-            # GT box (point-form) for 각 positive anchor
-            pos_gt_boxes = gt_box_t[pos_idx].view(-1, 4)
+            # 2) GT box (point-form, [xmin, ymin, xmax, ymax], 0~1 normalized)
+            pos_gt_boxes = gt_box_t[pos_idx].view(-1, 4)  # [N_pos, 4]
 
-            # per-positive size weight (small/med/large)
+            # 3) per-positive size weight (small/med/large) - 기존 그대로 유지
             with torch.no_grad():
                 size_w_b = self._get_size_weights(pos_gt_boxes)  # [N_pos]
 
-            # 원래 sum 대신, per-anchor loss에 weight 곱
-            bbox_loss_raw = F.smooth_l1_loss(loc_p, loc_t_pos, reduction='none')  # [N_pos, 4]
-            bbox_loss_raw = bbox_loss_raw.sum(dim=1)  # [N_pos]
+            # 4) 각 positive anchor에 해당하는 prior box 가져오기
+            priors_batch = priors.unsqueeze(0).expand(batch_size, num_priors, 4)
+            pos_priors   = priors_batch[pos_idx].view(-1, 4)      # [N_pos, 4]
 
+            # 5) offset(loc_p) + prior(pos_priors)를 decode해서 실제 box 좌표로 변환
+            boxes_pred = decode(loc_p, pos_priors, cfg.use_yolo_regressors)  # [N_pos, 4], (xmin,ymin,xmax,ymax)
+            boxes_targ = pos_gt_boxes                                        # [N_pos, 4]
+
+            # 6) GIoU 기반 bbox loss 계산: L = 1 - GIoU
+            bbox_loss_raw = self.giou_loss(boxes_pred, boxes_targ)  # [N_pos]
+
+            # 7) size-aware weight 적용 후 sum
             losses['B'] = (bbox_loss_raw * size_w_b).sum() * cfg.bbox_alpha
+
+
 
         # --------------------
         # M: Mask Loss
@@ -228,6 +259,54 @@ class MultiBoxLoss(nn.Module):
         #  - E: Class Existence Loss
         #  - S: Semantic Segmentation Loss
         return losses
+    def giou_loss(self, boxes_pred, boxes_targ, eps=1e-7):
+        """
+        GIoU Loss
+        boxes_pred, boxes_targ: [N, 4], (xmin, ymin, xmax, ymax), 0~1 normalized
+        return: [N] = 1 - GIoU
+        """
+        x1_p, y1_p, x2_p, y2_p = boxes_pred[:, 0], boxes_pred[:, 1], boxes_pred[:, 2], boxes_pred[:, 3]
+        x1_t, y1_t, x2_t, y2_t = boxes_targ[:, 0], boxes_targ[:, 1], boxes_targ[:, 2], boxes_targ[:, 3]
+
+        # 각 박스 area
+        area_p = (x2_p - x1_p).clamp(min=0) * (y2_p - y1_p).clamp(min=0)
+        area_t = (x2_t - x1_t).clamp(min=0) * (y2_t - y1_t).clamp(min=0)
+
+        # 교집합
+        x1_i = torch.max(x1_p, x1_t)
+        y1_i = torch.max(y1_p, y1_t)
+        x2_i = torch.min(x2_p, x2_t)
+        y2_i = torch.min(y2_p, y2_t)
+
+        w_i = (x2_i - x1_i).clamp(min=0)
+        h_i = (y2_i - y1_i).clamp(min=0)
+        inter = w_i * h_i
+
+        # 합집합
+        union = area_p + area_t - inter
+        union = union.clamp(min=eps)
+
+        iou = inter / union
+
+        # 외접 박스 C
+        x1_c = torch.min(x1_p, x1_t)
+        y1_c = torch.min(y1_p, y1_t)
+        x2_c = torch.max(x2_p, x2_t)
+        y2_c = torch.max(y2_p, y2_t)
+
+        w_c = (x2_c - x1_c).clamp(min=0)
+        h_c = (y2_c - y1_c).clamp(min=0)
+        area_c = (w_c * h_c).clamp(min=eps)
+
+        # GIoU = IoU - (|C \ (A ∪ B)| / |C|)
+        giou = iou - (area_c - union) / area_c
+        giou = torch.clamp(giou, min=-1.0, max=1.0)
+
+        loss = 1.0 - giou
+        return loss
+
+
+
 
     def class_existence_loss(self, class_data, class_existence_t):
         return cfg.class_existence_alpha * F.binary_cross_entropy_with_logits(class_data, class_existence_t, reduction='sum')
