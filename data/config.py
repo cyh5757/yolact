@@ -745,15 +745,15 @@ cell_yolact_im700_config = yolact_im700_config.copy({
         'selected_layers': list(range(1, 4)),
         'use_pixel_scales': True,
         'preapply_sqrt': False,
-        'use_square_anchors': True,
-        'pred_aspect_ratios': [ [[0.5, 0.84, 1.0, 2.1]] ] * 5,
+        'use_square_anchors': False,
+        'pred_aspect_ratios': [ [[0.5, 0.9, 1.5, 2.0]] ] * 5,
         # 1024 해상도 기준 소물체 대응용으로 16 추가
         'pred_scales': [
-            [32, 48, 64],          # P3 (작게)
-            [96, 128, 160],        # P4
-            [192, 256, 320],       # P5
-            [384, 448, 512],       # P6
-            [640, 768, 896],       # P7 (라지 목표)
+            [5.3,  8.2, 11.8],   # P3: small
+            [8.2, 11.8, 18.2],   # P4: small~medium
+            [11.8, 18.2, 30.0],  # P5: medium 위주
+            [18.2, 30.0, 47.0],  # P6: medium~large
+            [30.0, 47.0, 70.0],  # P7: large + extra large(콜로니)
         ],
     }),
 
