@@ -735,7 +735,7 @@ cell_yolact_im700_config = yolact_im700_config.copy({
     'use_maskiou': True,
     'maskiou_net': [(8, 3, {'stride': 2}), (16, 3, {'stride': 2}), (32, 3, {'stride': 2}),
                     (64, 3, {'stride': 2}), (128, 3, {'stride': 2})],
-    'maskiou_alpha': 5,
+    'maskiou_alpha': 20,
     'rescore_mask': True,
     'rescore_bbox': False,
     'mask_dice_alpha' : 1.0,
@@ -746,14 +746,14 @@ cell_yolact_im700_config = yolact_im700_config.copy({
         'use_pixel_scales': True,
         'preapply_sqrt': False,
         'use_square_anchors': False,
-        'pred_aspect_ratios': [ [[0.5, 0.9, 1.5, 2.0]] ] * 5,
+        'pred_aspect_ratios': [ [[0.3, 0.84, 1.0, 2.0]] ] * 5,
         # 1024 해상도 기준 소물체 대응용으로 16 추가
         'pred_scales': [
-            [5.3,  8.2, 11.8],   # P3: small
-            [8.2, 11.8, 18.2],   # P4: small~medium
-            [11.8, 18.2, 30.0],  # P5: medium 위주
-            [18.2, 30.0, 47.0],  # P6: medium~large
-            [30.0, 47.0, 70.0],  # P7: large + extra large(콜로니)
+            [32, 48, 64],          # P3 (작게)
+            [48, 128, 160],        # P4
+            [192, 256, 320],       # P5
+            [384, 448, 512],       # P6
+            [640, 768, 896],       # P7 (라지 목표)
         ],
     }),
 
