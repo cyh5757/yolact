@@ -83,6 +83,70 @@ class COCODetection(data.Dataset):
         self.name = dataset_name
         self.has_gt = has_gt
 
+        # -------------------------------------------------
+        # 이미지 단위 size 분포 기반 oversampling weight 계산
+        #  - small가 많으면 패널티
+        #  - medium/large가 많으면 보너스
+        #  → train.py에서 WeightedRandomSampler에 사용 가능
+        # -------------------------------------------------
+        self.sample_weights = self._compute_size_based_weights()
+
+    # -------------------------------------------------
+    # 이미지 단위 size weight 계산 (medium/large oversampling용)
+    # -------------------------------------------------
+    def _compute_size_based_weights(self):
+        """
+        각 image id마다 small/medium/large box 개수를 세고
+        small 많은 이미지는 weight ↓, medium/large 많은 이미지는 weight ↑
+        """
+        small_thr  = getattr(cfg, "small_area_thr", 0.005)  # 상대 면적 기준
+        large_thr  = getattr(cfg, "large_area_thr", 0.01)
+
+        w_small_penalty = getattr(cfg, "img_weight_small_penalty", 0.2)
+        w_med_bonus     = getattr(cfg, "img_weight_medium_bonus", 0.5)
+        w_large_bonus   = getattr(cfg, "img_weight_large_bonus", 1.0)
+
+        weights = []
+        for img_id in self.ids:
+            ann_ids = self.coco.getAnnIds(imgIds=img_id)
+            anns = self.coco.loadAnns(ann_ids)
+
+            # GT 없는 이미지는 그냥 weight=1
+            if len(anns) == 0:
+                weights.append(1.0)
+                continue
+
+            img_info = self.coco.loadImgs(img_id)[0]
+            w_img, h_img = img_info["width"], img_info["height"]
+            img_area = float(w_img * h_img) + 1e-6
+
+            small_cnt, med_cnt, large_cnt = 0, 0, 0
+            for ann in anns:
+                if "bbox" not in ann:
+                    continue
+                x, y, w, h = ann["bbox"]  # COCO bbox in pixels
+                area_rel = (w * h) / img_area
+
+                if area_rel < small_thr:
+                    small_cnt += 1
+                elif area_rel > large_thr:
+                    large_cnt += 1
+                else:
+                    med_cnt += 1
+
+            # 간단한 weight 설계:
+            #  - medium/large 많이 포함된 이미지는 더 자주 뽑고
+            #  - small만 잔뜩인 이미지는 덜 뽑게
+            w = 1.0 + w_med_bonus * med_cnt + w_large_bonus * large_cnt - w_small_penalty * small_cnt
+
+            # 음수/0 방지
+            if w <= 0:
+                w = 0.1
+
+            weights.append(w)
+
+        return torch.tensor(weights, dtype=torch.float32)
+
     def __getitem__(self, index):
         """
         Args:
@@ -138,8 +202,52 @@ class COCODetection(data.Dataset):
 
         if self.target_transform is not None and len(target) > 0:
             target = self.target_transform(target, width, height)
+            # target: list of [x1, y1, x2, y2, label] (0~1 normalized)
 
         n_before = len(target) if target is not None else 0
+
+        # -------------------------------------------------
+        # small instance undersampling (bbox/mask 레벨)
+        #  - small box는 일부만 유지 (small_keep_prob)
+        #  - medium/large는 모두 유지
+        #  - 최소 1개 객체는 반드시 남김
+        # -------------------------------------------------
+        if n_before > 0:
+            t = np.array(target, dtype=np.float32)  # [N,5]
+            boxes = t[:, :4]
+            labels = t[:, 4]
+
+            ws = boxes[:, 2] - boxes[:, 0]
+            hs = boxes[:, 3] - boxes[:, 1]
+            areas = ws * hs  # 상대 면적 (0~1)
+
+            small_thr_box   = getattr(cfg, "small_area_thr", 0.005)
+            small_keep_prob = getattr(cfg, "small_keep_prob", 0.3)
+
+            is_small = areas < small_thr_box
+
+            # 기본: small 아닌 건 다 keep
+            keep = ~is_small
+
+            # small은 일정 확률로만 살려두기
+            if small_keep_prob < 1.0:
+                rand = np.random.rand(len(areas))
+                keep |= (is_small & (rand < small_keep_prob))
+            else:
+                keep |= is_small  # prob=1이면 전부 유지
+
+            # 전부 날아가는 상황 방지 → 가장 큰 박스 하나는 무조건 남김
+            if keep.sum() == 0:
+                max_idx = int(np.argmax(areas))
+                keep[max_idx] = True
+
+            t = t[keep]
+            target = t.tolist()
+
+            if masks is not None:
+                masks = masks[keep.astype(bool)]
+
+            n_before = len(target) if target is not None else 0
 
         if self.transform is not None:
             if n_before > 0:

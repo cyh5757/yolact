@@ -416,7 +416,7 @@ coco_base_config = Config({
 
     # The terms to scale the respective loss by
     'conf_alpha': 1,
-    'bbox_alpha': 1.5,
+    'bbox_alpha': 6,
     'mask_alpha': 0.4 / 256 * 140 * 140, # Some funky equation. Don't worry about it.
 
     # Eval.py sets this if you just want to run YOLACT as a detector
@@ -610,7 +610,7 @@ coco_base_config = Config({
     # Inspried by Mask Scoring R-CNN (https://arxiv.org/abs/1903.00241)
     # Do not crop out the mask with bbox but slide a convnet on the image-size mask,
     # then use global pooling to get the final mask score
-    'use_maskiou': True,
+    'use_maskiou': False,
     
     # Archecture for the mask iou network. A (num_classes-1, 1, {}) layer is appended to the end.
     'maskiou_net': [],
@@ -672,8 +672,8 @@ yolact_base_config = coco_base_config.copy({
     'share_prediction_module': True,
     'extra_head_net': [(256, 3, {'padding': 1})],
 
-    'positive_iou_threshold': 0.5,
-    'negative_iou_threshold': 0.5,
+    'positive_iou_threshold': 0.3,
+    'negative_iou_threshold': 0.25,
 
     'crowd_iou_threshold': 0.7,
 
@@ -692,7 +692,7 @@ yolact_im400_config = yolact_base_config.copy({
 yolact_im700_config = yolact_base_config.copy({
     'name': 'yolact_im700',
 
-    'masks_to_train': 300,
+    'masks_to_train': 400,
     'max_size': 1024,
     'backbone': yolact_base_config.backbone.copy({
         'pred_scales': [[int(x[0] / yolact_base_config.max_size * 1024)] for x in yolact_base_config.backbone.pred_scales],
@@ -732,7 +732,7 @@ cell_yolact_im700_config = yolact_im700_config.copy({
     'mask_proto_crop_with_pred_box': False,
 
     # --------- MaskIoU로 점수 재보정 ---------
-    'use_maskiou': True,
+    'use_maskiou': False,
     'maskiou_net': [(8, 3, {'stride': 2}), (16, 3, {'stride': 2}), (32, 3, {'stride': 2}),
                     (64, 3, {'stride': 2}), (128, 3, {'stride': 2})],
     'maskiou_alpha': 20.0,
@@ -773,7 +773,7 @@ cell_yolact_im700_config = yolact_im700_config.copy({
     'adamw_weight_decay': 0.01,        # AdamW 전용 WD
     'adamw_betas': (0.9, 0.999),
     'adamw_eps': 1e-8,
-    'lr_warmup_until': 1000,           # 워밍업 살짝 늘림
+    'lr_warmup_until': 300,           # 워밍업 살짝 늘림
 
     # 이미 max_size=1024 (yolact_im700_config 상속)
 })

@@ -321,8 +321,8 @@ class MultiBoxLoss(nn.Module):
     def _get_size_weights(
         self,
         boxes,
-        small_thr=0.005,  # area < 0.005 → small
-        large_thr=0.01,   # area > 0.01 → large
+        small_thr=0.05,  # area < 0.05 → small
+        large_thr=0.1,   # area > 0.1 → large
         small_w=0.5,
         med_w=1.5,
         large_w=2.0,

@@ -6,6 +6,7 @@
 # -----------------------------
 
 from torch.cpu import is_available
+from torch.utils.data import WeightedRandomSampler
 from data import *
 from utils.augmentations import SSDAugmentation, BaseTransform, SSD_ALBU_Augmentation
 from utils.functions import MovingAverage, SavePath
@@ -1154,10 +1155,17 @@ def train():
     num_epochs = math.ceil(cfg.max_iter / epoch_size)
     step_index = 0
 
+    sampler = WeightedRandomSampler(
+    weights=dataset.sample_weights,
+    num_samples=len(dataset),
+    replacement=True,   # oversampling 허용
+    )
+
     data_loader = data.DataLoader(
         dataset, args.batch_size,
         num_workers=args.num_workers,
         shuffle=False,
+        sampler=sampler,
         collate_fn=detection_collate,
         pin_memory=(device.type == 'cuda')
     )
