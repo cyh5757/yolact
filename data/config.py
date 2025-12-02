@@ -610,7 +610,7 @@ coco_base_config = Config({
     # Inspried by Mask Scoring R-CNN (https://arxiv.org/abs/1903.00241)
     # Do not crop out the mask with bbox but slide a convnet on the image-size mask,
     # then use global pooling to get the final mask score
-    'use_maskiou': False,
+    'use_maskiou': True,
     
     # Archecture for the mask iou network. A (num_classes-1, 1, {}) layer is appended to the end.
     'maskiou_net': [],
@@ -618,10 +618,10 @@ coco_base_config = Config({
     # Discard predicted masks whose area is less than this
     'discard_mask_area': 10,
 
-    'maskiou_alpha': 1.0,
+    'maskiou_alpha': 25.0,
     'rescore_mask': False,
     'rescore_bbox': False,
-    'maskious_to_train': 100,
+    'maskious_to_train': -1,
 })
 
 
@@ -735,7 +735,7 @@ cell_yolact_im700_config = yolact_im700_config.copy({
     'use_maskiou': True,
     'maskiou_net': [(8, 3, {'stride': 2}), (16, 3, {'stride': 2}), (32, 3, {'stride': 2}),
                     (64, 3, {'stride': 2}), (128, 3, {'stride': 2})],
-    'maskiou_alpha': 20,
+    'maskiou_alpha': 20.0,
     'rescore_mask': True,
     'rescore_bbox': False,
     'mask_dice_alpha' : 1.0,
@@ -749,11 +749,11 @@ cell_yolact_im700_config = yolact_im700_config.copy({
         'pred_aspect_ratios': [ [[0.3, 0.84, 1.0, 2.0]] ] * 5,
         # 1024 해상도 기준 소물체 대응용으로 16 추가
         'pred_scales': [
-            [32, 48, 64],          # P3 (작게)
-            [48, 128, 160],        # P4
-            [192, 256, 320],       # P5
-            [384, 448, 512],       # P6
-            [640, 768, 896],       # P7 (라지 목표)
+            [8],          # P3 (작게)
+            [48],        # P4
+            [192],       # P5
+            [384],       # P6
+            [768],       # P7 (라지 목표)
         ],
     }),
 
@@ -842,7 +842,7 @@ yolact_plus_base_config = yolact_base_config.copy({
         'use_square_anchors': False,
     }),
 
-    'use_maskiou': True,
+    'use_maskiou': False,
     'maskiou_net': [(8, 3, {'stride': 2}), (16, 3, {'stride': 2}), (32, 3, {'stride': 2}), (64, 3, {'stride': 2}), (128, 3, {'stride': 2})],
     'maskiou_alpha': 25,
     'rescore_bbox': False,

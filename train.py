@@ -757,8 +757,8 @@ def compute_validation_map(epoch, iteration, yolact_net, dataset, log:Log=None, 
     eval_args = [
         '--no_bar',
         f'--max_images={args.validation_size}',
-        '--top_k=100',
-        '--score_threshold=0.05',
+        '--top_k=300',
+        '--score_threshold=0.01',
         '--fast_nms=True',
         '--cross_class_nms=False',
         '--output_coco_json',
@@ -815,8 +815,8 @@ def setup_eval():
     eval_script.parse_args([
         '--no_bar',
         f'--max_images={args.validation_size}',
-        '--top_k=100',
-        '--score_threshold=0.05',
+        '--top_k=300',
+        '--score_threshold=0.01',
         '--fast_nms=True',
         '--cross_class_nms=False'
     ])

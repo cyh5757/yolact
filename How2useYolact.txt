@@ -60,12 +60,12 @@ python train.py \
   --validation_size=10 \
   --use_wandb=True \
   --wandb_project=YOLACT-Cell \
-  --wandb_name=251125_1019_Loss_I \
-  --exp_dir=/home/mbd1234/yolact/experiments/251125_1019_Loss_I \
+  --wandb_name=251201_1719_Loss_Update \
+  --exp_dir=/home/mbd1234/yolact/experiments/251201_1719_Loss_Update \
   --no_autoscale \
   --early_stop=True \
   --patience=80 \
-  --prefer_metric=mask_box_avg
+  --prefer_metric=mask_first
   # 필요하면 --cosine_t0=300 같이 추가해서 첫 사이클 길이 직접 지정
 
 
@@ -74,10 +74,10 @@ python train.py \
 최신 명령어
 #이미지만만 + 모델 통계/플롭스
 python eval.py \
-  --trained_model  /home/mbd1234/yolact/experiments/251125_1019_Loss_I_NonAug/weights/best_iter0001360_ep033_score23.3200.pth \
+  --trained_model /home/mbd1234/yolact/experiments/251201_1719_Loss_Update/weights/best_iter0002640_ep065_score14.1000.pth \
   --config cell_yolact_im700_config \
   --cuda True \
-  --images /home/mbd1234/data/yolo_set_3/images/val:/home/mbd1234/data/Data_Analyze/preview/eval_testing_251125_1800_NonAug/val_best \
+  --images /home/mbd1234/data/yolo_set_3/images/val:/home/mbd1234/data/Data_Analyze/preview/eval_testing_251201_1719_Loss_Update/val_best \
   --score_threshold 0.05 \
   --top_k 1000 \
   --fast_nms True \
@@ -89,7 +89,7 @@ python eval.py \
   --model_stats True \
   --flops_hw 700x700 \
   --flops_use_dummy True \
-  --stats_csv /home/mbd1234/data/Data_Analyze/preview/eval_testing_251125_1800_NonAug/best_stats.csv \
+  --stats_csv /home/mbd1234/data/Data_Analyze/preview/eval_testing_251201_1719_Loss_Update/best_stats.csv \
   --compute_aji False
 
 
